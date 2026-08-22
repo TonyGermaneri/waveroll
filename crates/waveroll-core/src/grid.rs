@@ -141,6 +141,34 @@ pub fn snap_range(map: &TempoMap, unit_bars: f64, a: u64, b: u64) -> Selection {
     }
 }
 
+/// Like [`snap_range`], but never reaching past `limit`.
+///
+/// Snapping the end *up* is right for a drag — you meant the cell your pointer was in — but at the
+/// write head it selects a cell the audio has not reached yet, which cannot be exported. Where the
+/// intent is "the material between here and now", the end walks back to the last complete cell
+/// instead. Returns `None` when not even one whole cell has finished, which is a real answer:
+/// there is nothing there to take yet.
+pub fn snap_range_upto(
+    map: &TempoMap,
+    unit_bars: f64,
+    a: u64,
+    b: u64,
+    limit: u64,
+) -> Option<Selection> {
+    let unit = guard_unit(unit_bars);
+    let lo = a.min(b);
+    let hi = a.max(b).min(limit);
+    let first = (map.bars_at(lo) / unit).floor();
+    let last = (map.bars_at(hi) / unit).floor();
+    if last <= first {
+        return None;
+    }
+    Some(Selection {
+        start: map.frame_at_bars(first * unit),
+        end: map.frame_at_bars(last * unit),
+    })
+}
+
 /// The number row: the most recent `tenths`/10 of the window, ending at the write head.
 ///
 /// Head to tail, snapped outward, clamped to the window. `tenths` is 1..=10, with the `0` key
@@ -315,6 +343,34 @@ mod tests {
         assert!((map.bars_at(sel.end) - 11.0).abs() < one_frame_of_a_bar(sel.end));
         // And the two halves really are different lengths, or this test proves nothing.
         assert!(map.frames_per_bar_at(0) > map.frames_per_bar_at(change) * 1.4);
+    }
+
+    #[test]
+    fn a_range_taken_to_the_head_never_reaches_past_it() {
+        let map = flat();
+        let head = map.frame_at_bars(9.4); // four tenths of the way into bar 10
+        let from = map.frame_at_bars(4.0);
+        // The ordinary snap rounds the end up, past audio that does not exist yet. That is correct
+        // for a drag and wrong for "everything since the mark", which is why both exist.
+        let eager = snap_range(&map, 1.0, from, head);
+        assert!(eager.end > head, "this is the behaviour the other function exists to avoid");
+
+        let complete = snap_range_upto(&map, 1.0, from, head, head).expect("five whole bars exist");
+        assert!(complete.end <= head, "a completed range may not pass the head");
+        assert!((map.bars_at(complete.end) - 9.0).abs() < 1e-6, "it should stop at bar 9");
+        assert!((map.bars_at(complete.start) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_range_with_no_whole_cell_yet_is_nothing_rather_than_a_guess() {
+        let map = flat();
+        let from = map.frame_at_bars(4.2);
+        let head = map.frame_at_bars(4.6);
+        // Not one whole bar has passed since the mark, so at a one-bar grid there is nothing to
+        // take. Returning the containing cell would hand back audio from before the mark.
+        assert!(snap_range_upto(&map, 1.0, from, head, head).is_none());
+        // At a finer grid the same span does contain whole cells.
+        assert!(snap_range_upto(&map, 0.125, from, head, head).is_some());
     }
 
     #[test]

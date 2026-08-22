@@ -24,6 +24,7 @@ use waveroll_core::view::{View, Viewport};
 use waveroll_gpu::device::Gpu;
 use waveroll_gpu::envelope::{EnvelopePass, RingMirror};
 use waveroll_gpu::overlay::{Overlay, OverlayPass};
+use waveroll_core::wav::{self, Acid, Bext, Depth, WavMeta, WavSpec};
 use waveroll_gpu::render::{OverlayStyle, Style};
 
 #[wasm_bindgen(start)]
@@ -52,6 +53,19 @@ struct Status {
     selection: Option<(f64, f64, f64)>,
     in_view: bool,
     lapped: u64,
+    state: String,
+    held: bool,
+    markers: u32,
+}
+
+/// `4` rather than `4.00`, and `4.5` rather than `4.50`: a bar count is read, not measured.
+fn format_bars(bars: f64) -> String {
+    let rounded = (bars * 100.0).round() / 100.0;
+    if (rounded - rounded.round()).abs() < 1e-9 {
+        format!("{}", rounded.round() as i64)
+    } else {
+        format!("{rounded}").replace('.', "-")
+    }
 }
 
 #[wasm_bindgen]
@@ -84,6 +98,12 @@ pub struct Waveroll {
     view: View,
     unit: Unit,
     selection: Option<Selection>,
+    /// Frames at which the user said "that was good". The workflow is entirely retrospective, so
+    /// this is the control that turns "I noticed" into a selection without hunting for the edge.
+    markers: Vec<u64>,
+    /// Where the write head was frozen, if it is. Hold does not stop capture — it stops the
+    /// *picture*, by leaving the GPU mirror unsynced and reporting the frozen head.
+    held_at: Option<u64>,
     style: Style,
     overlay_style: OverlayStyle,
     status: Status,
@@ -149,6 +169,8 @@ impl Waveroll {
             view: View::new(16.0),
             unit: Unit::Auto,
             selection: None,
+            markers: Vec::new(),
+            held_at: None,
             style: Style::default(),
             overlay_style: OverlayStyle::default(),
             status: Status::default(),
@@ -263,8 +285,13 @@ impl Waveroll {
 
     // ---- selection ----
 
+    /// The head the display and selection work from — frozen while held.
+    fn head(&self) -> u64 {
+        self.held_at.unwrap_or_else(|| self.clock.captured())
+    }
+
     fn viewport(&self) -> Viewport {
-        Viewport::resolve(&self.view, self.clock.map(), self.clock.captured(), self.size.0)
+        Viewport::resolve(&self.view, self.clock.map(), self.head(), self.size.0)
     }
 
     fn unit_bars(&self, viewport: &Viewport) -> f64 {
@@ -309,6 +336,138 @@ impl Waveroll {
         self.selection = None;
     }
 
+    // ---- hold and markers ----
+
+    /// Freezes the picture without stopping capture.
+    ///
+    /// The premise of the whole tool is retrospective — *that was good, grab it* — which means
+    /// reaching backwards while the writer keeps eating the tail. Sixteen bars is 32 seconds at
+    /// 120 and 22 at 174, which is not long to notice, decide, select and check.
+    ///
+    /// It freezes the display rather than the ring, by leaving the GPU mirror unsynced and
+    /// reporting the frozen head. Capture continues underneath, so nothing is lost — but the ring
+    /// does keep advancing, so a selection held long enough is eventually overwritten and
+    /// `selection_live` starts refusing it. The grace is the difference between the ring and the
+    /// window: about twelve seconds at the defaults, and the status says when it has gone.
+    pub fn hold(&mut self, on: bool) {
+        self.held_at = if on { Some(self.clock.captured()) } else { None };
+    }
+
+    pub fn is_held(&self) -> bool {
+        self.held_at.is_some()
+    }
+
+    /// Drops a marker at the live head — not the frozen one, since a marker records when something
+    /// happened rather than where you were looking.
+    pub fn mark(&mut self) {
+        let at = self.clock.captured();
+        self.markers.push(at);
+        // Anything older than the ring can never be selected again, so keeping it would only grow
+        // a list nobody can act on.
+        let oldest = self.reader.oldest();
+        self.markers.retain(|m| *m >= oldest);
+    }
+
+    /// Selects from the most recent marker to the head, snapped.
+    ///
+    /// The most-used control in the finished tool, probably: you notice a good passage *after* it
+    /// has happened, and this is the shortest path from noticing to having it.
+    pub fn select_from_marker(&mut self) -> bool {
+        let head = self.head();
+        let Some(&at) = self.markers.iter().rev().find(|m| **m < head) else { return false };
+        let viewport = self.viewport();
+        let unit = self.unit_bars(&viewport);
+        // Bounded by the head: "everything since the mark" means the material that exists, and
+        // rounding the end up would select a cell the audio has not reached yet.
+        match grid::snap_range_upto(self.clock.map(), unit, at, head, head) {
+            Some(selection) => {
+                self.selection = Some(selection);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn clear_markers(&mut self) {
+        self.markers.clear();
+    }
+
+    // ---- staging ----
+
+    /// Materialises the selection as a WAV file.
+    ///
+    /// `time_reference` is samples since midnight, for the Broadcast Wave timestamp — the field a
+    /// host reads to spot a file back to where it was captured. It comes from the caller because
+    /// the core has no clock of its own and should not grow one.
+    ///
+    /// Returns an empty vector when the selection has been overwritten, which is the only honest
+    /// answer: a partly-lapped range reads back as a seam of old and new audio that looks
+    /// completely plausible and is not what anybody selected.
+    pub fn stage(&mut self, time_reference: f64) -> Vec<u8> {
+        let Some(selection) = self.selection else { return Vec::new() };
+        if !self.reader.holds(selection.start, selection.end) {
+            return Vec::new();
+        }
+        let frames = selection.frames() as usize;
+        if frames == 0 {
+            return Vec::new();
+        }
+
+        let mut planes: Vec<Vec<f32>> = Vec::with_capacity(self.channels);
+        for channel in 0..self.channels {
+            let mut plane = vec![0.0f32; frames];
+            if !self.reader.read_into(channel, selection.start, &mut plane) {
+                // Lapped between the check above and here. Refusing is the whole point.
+                return Vec::new();
+            }
+            planes.push(plane);
+        }
+        let views: Vec<&[f32]> = planes.iter().map(|p| p.as_slice()).collect();
+
+        let map = self.clock.map();
+        let quarters = map.quarters_at(selection.end) - map.quarters_at(selection.start);
+        let meta = WavMeta {
+            // The chunk that makes a host warp the drop to its own session instead of treating it
+            // as a one-shot. Its tempo and beat count must agree with the audio's actual length,
+            // so both are taken from the map rather than from the transport's current reading.
+            acid: Some(Acid {
+                tempo: map.bpm_at(selection.start) as f32,
+                quarters: quarters.round().max(1.0) as u32,
+                meter: map.meter_at(selection.start),
+                root: None,
+            }),
+            bext: Some(Bext {
+                description: "Waveroll capture".into(),
+                originator: "Waveroll".into(),
+                time_reference: time_reference.max(0.0) as u64,
+                coding_history: format!(
+                    "A=PCM,F={},W=32,M={}\r\n",
+                    self.producer_rate(),
+                    if self.channels > 1 { "stereo" } else { "mono" }
+                ),
+                ..Bext::default()
+            }),
+        };
+        let spec = WavSpec::new(self.producer_rate(), Depth::F32);
+        wav::write(&views, &spec, &meta)
+    }
+
+    fn producer_rate(&self) -> u32 {
+        self.reader.sample_rate()
+    }
+
+    /// A filename carrying what you will want to know about this file in six months.
+    pub fn stage_name(&self) -> String {
+        let Some(selection) = self.selection else { return "waveroll.wav".into() };
+        let map = self.clock.map();
+        let bars = map.bars_at(selection.end) - map.bars_at(selection.start);
+        format!(
+            "waveroll_{:.0}bpm_{}bars.wav",
+            map.bpm_at(selection.start),
+            format_bars(bars)
+        )
+    }
+
     /// Re-phases the bar lines so the current head is a downbeat.
     ///
     /// The only way bar one is ever established with Live, which sends Start from wherever the
@@ -322,6 +481,23 @@ impl Waveroll {
     /// rather than hand over a seam of old and new audio that looks perfectly plausible.
     pub fn selection_live(&self) -> bool {
         self.selection.is_some_and(|s| self.reader.holds(s.start, s.end))
+    }
+
+    /// Why a selection cannot be staged, when it cannot.
+    ///
+    /// `pending` and `overwritten` are opposite problems — not recorded yet, and already gone —
+    /// and one message for both sends people looking in the wrong direction. A selection dragged
+    /// across the write head is *pending*: its last cell rounds up past audio that has not
+    /// happened, and it becomes ready on its own a fraction of a bar later.
+    pub fn selection_state(&self) -> String {
+        let Some(selection) = self.selection else { return "empty".into() };
+        if selection.end > self.reader.head() {
+            return "pending".into();
+        }
+        if !self.reader.holds(selection.start, selection.end) {
+            return "overwritten".into();
+        }
+        "ready".into()
     }
 
     /// Whether the selection is still on screen.
@@ -343,7 +519,11 @@ impl Waveroll {
     // ---- painting ----
 
     pub fn frame(&mut self) -> Result<(), JsValue> {
-        self.mirror.sync(&self.gpu, &self.reader);
+        // Held: the mirror is left as it was, so the picture is exactly what it was at the moment
+        // hold was pressed. Capture carries on into the ring underneath.
+        if self.held_at.is_none() {
+            self.mirror.sync(&self.gpu, &self.reader);
+        }
         let viewport = self.viewport();
         let unit = self.unit_bars(&viewport);
         let columns = self.envelope.dispatch(
@@ -385,6 +565,12 @@ impl Waveroll {
                 &self.overlay_style,
             );
         }
+        for marker in &self.markers {
+            let fraction = viewport.fraction_at(self.clock.map().bars_at(*marker));
+            if (0.0..=1.0).contains(&fraction) {
+                self.overlay.vline(fraction, 1.0, [0.42, 0.78, 1.0, 0.8]);
+            }
+        }
         self.overlay.head(viewport.head_fraction(), &self.overlay_style);
         self.overlay_pass.draw(&self.gpu, &view, self.size, &self.overlay);
 
@@ -406,6 +592,9 @@ impl Waveroll {
             }),
             in_view: self.selection_in_view(),
             lapped: self.reader.laps(),
+            state: self.selection_state(),
+            held: self.held_at.is_some(),
+            markers: self.markers.len() as u32,
         };
         Ok(())
     }
@@ -426,7 +615,7 @@ impl Waveroll {
         format!(
             "{{\"bpm\":{:.4},\"playing\":{},\"lap\":{},\"head\":{:.6},\"unit\":{:.6},\
              \"windowBars\":{},\"zoom\":{:.4},\"captured\":{},\"selection\":{selection},\
-             \"lapped\":{},\"selectionLive\":{},\"selectionInView\":{}}}",
+             \"lapped\":{},\"state\":\"{}\",\"selectionInView\":{},\"held\":{},\"markers\":{}}}",
             self.status.bpm,
             self.status.playing,
             self.status.lap,
@@ -436,8 +625,10 @@ impl Waveroll {
             self.status.zoom,
             self.status.captured,
             self.status.lapped,
-            self.selection_live(),
+            self.status.state,
             self.status.in_view,
+            self.status.held,
+            self.status.markers,
         )
     }
 

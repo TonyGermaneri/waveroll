@@ -22,6 +22,15 @@
     color: var(--ink-3); background: #0f141b; border: 1px solid var(--rule); border-radius: 2px; }
   #bindables span.hit { color: var(--ground); background: var(--accent); border-color: var(--accent); }
 
+  #tray { position: fixed; right: 14px; top: 14px; display: flex; align-items: center; gap: 6px;
+    background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 8px;
+    box-shadow: 0 8px 26px -10px #000; }
+  #chip { color: var(--accent); text-decoration: none; cursor: grab; user-select: none;
+    padding: 2px 6px; border-radius: 3px; }
+  #chip:hover { background: #2a2313; }
+  #chip:active { cursor: grabbing; }
+  #discard { padding: 0 6px; line-height: 1.4; color: var(--ink-3); border-color: transparent;
+    background: transparent; }
   #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 34px; display: flex;
     align-items: center; gap: 14px; padding: 0 12px; background: var(--panel);
     border-top: 1px solid var(--rule); white-space: nowrap; overflow-x: auto; }
@@ -46,6 +55,14 @@
 
 <div id="stage"><canvas id="canvas"></canvas></div>
 
+<!-- The staged file. Draggable, because dragging it somewhere is the entire point; and a plain
+     download alongside, because the browser drag is a file *promise* and plenty of applications
+     decline those. -->
+<div id="tray" hidden>
+  <a id="chip" draggable="true" download>—</a>
+  <button id="discard" title="Discard">×</button>
+</div>
+
 <div id="bindables">
   <span data-key="1">10%</span><span data-key="2">20%</span><span data-key="3">30%</span>
   <span data-key="4">40%</span><span data-key="5">50%</span><span data-key="6">60%</span>
@@ -62,6 +79,8 @@
   <span><b>grid</b><span id="unit">auto</span></span>
   <span><b>window</b><span id="window">16</span></span>
   <span><b>sel</b><span id="sel">—</span></span>
+  <span><b>marks</b><span id="marks">0</span></span>
+  <button id="hold">Hold</button>
   <span><b>tempo</b><input id="bpmIn" type="number" value="120" min="20" max="300" step="0.01"
     style="width:74px;font:inherit;background:#1d232d;color:var(--ink);border:1px solid #39424f;
     border-radius:3px;padding:2px 4px"></span>
@@ -79,7 +98,10 @@
       capture follows the transport, so nothing is recorded until something says it is playing.
       Enable MIDI and a DAW's clock takes over.</p>
     <p style="color:var(--ink-3)">drag to select · click for one cell · <code>1-0</code> last N×10%
-      · <code>\</code> fit · wheel to zoom · <code>space</code> run · <code>d</code> set downbeat</p>
+      · <code>\</code> fit · wheel to zoom · <code>space</code> run · <code>d</code> set downbeat<br>
+      <code>h</code> hold · <code>m</code> mark · <code>n</code> select from last mark ·
+      <code>c</code> stage the selection as a file</p>
+    <p style="margin-top:20px"><select id="device" style="max-width:34ch"><option value="">Default input</option></select></p>
     <button id="begin">Use my input</button>
     <button id="demo" style="margin-left:8px">Demo signal</button>
   </div>

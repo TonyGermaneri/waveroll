@@ -30,22 +30,49 @@ const state = {
   drag: null,
   unitBars: 0, // 0 = auto
   demo: null,
+  staged: null,
 };
 
 // ---------------------------------------------------------------------------------------
 // Audio
 // ---------------------------------------------------------------------------------------
 
+/**
+ * Lists inputs on the boot screen, once their labels are readable.
+ *
+ * A browser hides device labels until the page already holds a microphone permission, so an empty
+ * list here is not "no devices" — it is "not permitted yet", and the picker fills in after the
+ * first grant. Taking the default is a coin flip on a machine with a loopback driver, an
+ * interface and a webcam all offering audio.
+ */
+async function listDevices() {
+  const select = $('device');
+  if (!select) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const inputs = devices.filter((d) => d.kind === 'audioinput' && d.label);
+  for (const device of inputs) {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label;
+    select.append(option);
+  }
+}
+
 async function openCapture() {
   // Every browser defence is off. Chrome turns all three on by default, and automatic gain control
   // alone makes a captured level meaningless — which for a sampler means the file you drop is not
   // the sound you heard.
+  const wanted = $('device')?.value;
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: false,
       noiseSuppression: false,
       autoGainControl: false,
       channelCount: { ideal: 2 },
+      // `exact` rather than `ideal`: a named device that has gone away should fail loudly rather
+      // than silently capture something else, which is how you end up recording the wrong thing
+      // for twenty minutes without noticing.
+      ...(wanted ? { deviceId: { exact: wanted } } : {}),
     },
   });
   const settings = stream.getAudioTracks()[0].getSettings();
@@ -74,6 +101,7 @@ async function openCapture() {
   node.connect(sink).connect(ctx.destination);
 
   await ctx.resume();
+  state.deviceLabel = stream.getAudioTracks()[0].label || 'default input';
   state.ctx = ctx;
   state.ring = ring;
   state.reader = new RingReader(ring);
@@ -203,10 +231,12 @@ function resize() {
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
-    // The ratio goes with the size: the grid picks its unit against apparent spacing, and that is
-    // a question about CSS pixels rather than the ones the GPU fills.
-    state.wr?.resize(w, h, dpr);
   }
+  // Called every frame rather than only on a change, because the pixel ratio travels with it and
+  // a canvas that happened to be the right size already would otherwise never report one — which
+  // left the grid choosing its unit against device pixels on exactly the paths where the layout
+  // did not shift. The Rust side returns immediately when the size is unchanged.
+  state.wr?.resize(w, h, dpr);
 }
 
 function frame() {
@@ -236,7 +266,8 @@ function frame() {
 }
 
 function paintStatus(s) {
-  $('cap').textContent = s.playing ? 'capturing' : 'held';
+  $('cap').textContent = s.held ? 'frozen' : s.playing ? 'capturing' : 'stopped';
+  $('marks').textContent = s.markers;
   $('cap-dot').dataset.on = s.playing ? '1' : '0';
   $('clock').textContent = state.clockSource;
   $('bpm').textContent = s.bpm.toFixed(2);
@@ -250,7 +281,12 @@ function paintStatus(s) {
     // Position as a percentage across the window, not as a bar number: a selection older than the
     // window has no bar number in the lap on screen, and reporting one produces a negative.
     const where = `${(s.selection.from * 100).toFixed(0)}%`;
-    const flag = !s.selectionLive ? ' overwritten' : !s.selectionInView ? ' out of view' : '';
+    // `pending` and `overwritten` are opposite problems and must not read the same.
+    const flag =
+      s.state === 'pending' ? ' not captured yet'
+      : s.state === 'overwritten' ? ' overwritten'
+      : !s.selectionInView ? ' out of view'
+      : '';
     $('sel').textContent = `${s.selection.bars.toFixed(2)} bars @ ${where}${flag}`;
     $('sel').style.color = flag ? '#f0b342' : '';
   }
@@ -326,7 +362,10 @@ window.addEventListener('keydown', (event) => {
     case '\\': wr.home(); break;
     case ' ': toggleRun(); event.preventDefault(); break;
     case 'd': wr.set_downbeat_now(); note('downbeat set'); break;
-    case 'c': flash('c'); note('staging is phase 5'); break;
+    case 'c': case 'Enter': flash('c'); stage(); break;
+    case 'h': toggleHold(); break;
+    case 'm': state.wr.mark(); note('marked'); break;
+    case 'n': if (!state.wr.select_from_marker()) note('no marker behind the head'); break;
     case 'Escape': wr.clear_selection(); break;
     case '[': adjustWindow(-1); break;
     case ']': adjustWindow(1); break;
@@ -351,6 +390,65 @@ function adjustWindow(direction) {
   state.wr.set_window_bars(next);
 }
 
+/**
+ * Materialises the selection and offers it for dragging.
+ *
+ * The browser can only hand a drag target a *file promise* — `DownloadURL` — which Finder accepts
+ * and a good many applications do not. So the same chip is also a plain download link, which
+ * always works. A native shell hands over a real path and this whole caveat goes away.
+ */
+function stage() {
+  const wr = state.wr;
+  if (!wr) return;
+  // Samples since midnight, local: the Broadcast Wave timestamp a host reads to spot a file back
+  // where it was captured.
+  const now = new Date();
+  const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
+  const bytes = wr.stage(secondsToday * (state.ctx?.sampleRate ?? 48000));
+  if (bytes.length === 0) {
+    note({
+      empty: 'nothing selected',
+      pending: 'the last cell has not been captured yet — it will be ready in a moment',
+      overwritten: 'that selection has been overwritten',
+    }[wr.selection_state()] ?? 'nothing to stage');
+    return;
+  }
+  discard();
+  const name = wr.stage_name();
+  const blob = new Blob([bytes], { type: 'audio/wav' });
+  const url = URL.createObjectURL(blob);
+  state.staged = { url, name, size: bytes.length };
+
+  const chip = $('chip');
+  chip.textContent = `${name}  ${(bytes.length / 1048576).toFixed(2)} MB`;
+  chip.href = url;
+  chip.download = name;
+  $('tray').hidden = false;
+  note(`staged ${name}`);
+}
+
+$('chip').addEventListener('dragstart', (event) => {
+  if (!state.staged) return;
+  const { name, url } = state.staged;
+  // Chromium only, and the receiver has to ask for the bytes rather than being handed a path.
+  event.dataTransfer.setData('DownloadURL', `audio/wav:${name}:${url}`);
+  event.dataTransfer.setData('text/uri-list', url);
+  event.dataTransfer.effectAllowed = 'copy';
+});
+
+function discard() {
+  if (state.staged) URL.revokeObjectURL(state.staged.url);
+  state.staged = null;
+  $('tray').hidden = true;
+}
+
+function toggleHold() {
+  const on = !state.wr.is_held();
+  state.wr.hold(on);
+  $('hold').dataset.on = on ? '1' : '0';
+  $('hold').textContent = on ? 'Held' : 'Hold';
+}
+
 function toggleRun() {
   state.running = !state.running;
   $('run').dataset.on = state.running ? '1' : '0';
@@ -372,6 +470,8 @@ function note(text) {
 // ---------------------------------------------------------------------------------------
 
 $('run').addEventListener('click', toggleRun);
+$('hold').addEventListener('click', toggleHold);
+$('discard').addEventListener('click', discard);
 $('midi').addEventListener('click', () => enableMidi().catch((e) => note(String(e))));
 
 async function begin(demo) {
@@ -383,8 +483,8 @@ async function begin(demo) {
     resize();
     state.wr = await Waveroll.create(canvas, rate, state.channels, CAPACITY_LOG2);
     $('adapter').textContent =
-      `${state.wr.adapter()} · ${rate} Hz · ${state.channels}ch · ` +
-      (demo ? 'generator' : shared ? 'shared ring' : 'copied ring');
+      `${rate} Hz · ${state.channels}ch · ` +
+      (demo ? 'generator' : `${state.deviceLabel} · ${shared ? 'shared ring' : 'copied ring'}`);
     $('adapter').dataset.base = $('adapter').textContent;
     boot.remove();
     toggleRun();
@@ -396,6 +496,7 @@ async function begin(demo) {
   }
 }
 
+listDevices().catch(() => {});
 $('begin').addEventListener('click', () => begin(false));
 $('demo').addEventListener('click', () => begin(true));
 // `?demo` skips the picker entirely, which is what CI and a screenshot both want.
