@@ -28,7 +28,7 @@ fn material(frame: u64, beat: f64) -> f32 {
     let bar = beat_index / 4;
 
     let mut v = 0.0;
-    if beat_index % 4 == 0 || beat_index % 8 == 6 {
+    if beat_index.is_multiple_of(4) || beat_index % 8 == 6 {
         let env = (-phase * 22.0).exp();
         v += (TAU as f64 * 90.0 * phase * beat).sin() * env * 0.9;
     }
