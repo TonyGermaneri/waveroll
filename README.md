@@ -89,16 +89,19 @@ last true is the point.
 
 ### Results
 
-**Spike 2 — Ableton Live 12 Suite over IAC, 21 Aug 2026.** 408 ticks, 0 dropped.
+**Spike 2 — Ableton Live 12 Suite over IAC, 21 Aug 2026.** Live at exactly 120 BPM, 14,010 ticks
+over 291.9 s, 0 dropped. Trace checked in as `tests/traces/live12-120.txt`.
 
 | | |
 | --- | --- |
-| Tempo | 119.985 BPM against a nominal 120 |
-| Jitter, σ of interval | 0.048 ms — 2.3 samples at 48 kHz |
-| Worst excursion | 0.14 ms |
+| Tempo, least squares over the whole stream | 119.99970 BPM — **2.5 ppm** off nominal |
+| Jitter, σ of interval | 0.058 ms — 2.8 samples at 48 kHz |
+| Interval range | 20.700 – 21.000 ms about a 20.8334 mean |
+| Rolling tempo spread, 10-quarter windows | 0.0048 BPM |
 | Song Position Pointer | **never sent** |
+| Stop | never sent — the take ran unbroken |
 
-Three things follow.
+`ClockPll` replayed against it reads **120.000 BPM, worst excursion 0.030 BPM, nothing rejected.**
 
 **Live never sends SPP, and that is smaller than it sounds.** It sends `Start` whenever playback
 begins, wherever the playhead was, so capture beat zero is simply wherever the user pressed play.
@@ -108,19 +111,30 @@ more than one bar, and it lives in `TempoMap::bar_phase` — set by `set_downbea
 `set downbeat` key and its MIDI binding drive. Not a fallback: with Live it is the only way bar one
 is ever established.
 
-**Jitter over IAC is twenty times better than the estimator was designed for.** σ of 2.3 samples
-through a least-squares fit over 24 ticks is 0.068 samples of slope error — about 0.008 BPM. The
-window stays at 24 anyway, because USB-attached hardware is a different order of magnitude and this
-is the case that has to survive it, not the easy one.
+**MIDI clock over IAC is far better than its reputation.** 2.5 ppm of tempo accuracy and 58 µs of
+jitter is a bus, not a cable — nothing is being serialised over USB and no scheduler is between the
+two processes. σ of 2.8 samples through a least-squares fit over 24 ticks is about 0.008 BPM of
+slope error. The window stays at 24 regardless, because USB-attached hardware is a different order
+of magnitude and that is the case that has to survive, not this one.
 
-**119.985 against a nominal 120 is 125 ppm, and it is a clock-domain artefact rather than an
-error.** Live generates its clock on the audio thread, driven by the interface's crystal;
-`performance.now()` runs off the system clock; the trace tool times one with the other. That is
-4 ms of error at the far end of a 16-bar window and it grows with the window. It is also exactly
-why `ClockPll::feed` takes a **frame index rather than a timestamp** — stamping ticks in frames of
-our own capture clock, the same device clock Live is generating from, cancels the rate difference
-instead of accumulating it. Worth confirming what the session tempo was actually set to, to rule
-out the dull explanation.
+**A correction, and the lesson in it.** The capture tool reported 119.985 BPM live on screen, and
+that was first written up here as 125 ppm of clock-domain skew between Live's audio thread and
+`performance.now()`. The full trace refutes it: the real figure is 2.5 ppm, and 119.985 was exactly
+one standard error of the tool's own estimate — noise, read as an effect.
+
+The cause is worth keeping, because it is a trap in an obvious-looking piece of code. The mean of
+`n` intervals telescopes to `(last − first) / n`, so it depends only on the two endpoints and its
+error is about `σ√2/n` — very precise. The tool *trimmed* the outer 5% of intervals before
+averaging, to reject outliers, and trimming breaks the telescoping: what is left is a genuine
+average of `n` noisy samples with error `σ/√n`, which is **thirty times worse** here. The fix is to
+fit the timestamps rather than average the intervals, which is robust and precise at once, and is
+what `ClockPll` already does. Trimming is still the right thing for reporting jitter, and is kept
+there.
+
+None of this changes the architecture. `ClockPll::feed` still takes a **frame index rather than a
+timestamp**, because stamping ticks in frames of our own capture clock cancels any device-versus-
+system rate difference instead of accumulating it. It is simply guarding against 0.08 ms over a
+16-bar window rather than the 4 ms first claimed.
 
 ## Prior art in this repo's family
 

@@ -65,7 +65,7 @@ const NAMES = { 0xF8: 'clock', 0xFA: 'start', 0xFB: 'continue', 0xFC: 'stop', 0x
 
 let access = null, bound = [], recording = false;
 const trace = { started: null, port: null, events: [] };
-const intervals = [];
+const intervals = [], stamps = [];
 let lastTick = null, ticks = 0, dropped = 0, sawSpp = false;
 
 function log(line) {
@@ -83,7 +83,18 @@ function stats() {
   const sigma = Math.sqrt(core.reduce((a, b) => a + (b - mean) ** 2, 0) / core.length);
   const worst = Math.max(...intervals.map(v => Math.abs(v - mean)));
 
-  $('bpm').textContent = (60000 / (mean * 24)).toFixed(3) + ' BPM';
+  // Tempo comes from a fit over the timestamps, not from that trimmed mean, and the difference is
+  // not cosmetic. The mean of n intervals telescopes to (last - first) / n and is therefore very
+  // precise; trimming rejects outliers but destroys the telescoping, leaving an average of n noisy
+  // samples that is thirty times worse. This tool reported 119.985 for a stream measured at
+  // 119.99970 for exactly that reason. Trimming stays where it belongs, on the jitter figure.
+  const m = stamps.length;
+  const mx = (m - 1) / 2, my = stamps.reduce((a, b) => a + b, 0) / m;
+  let cov = 0;
+  for (let i = 0; i < m; i++) cov += (i - mx) * (stamps[i] - my);
+  const slope = cov / (m * (m * m - 1) / 12);
+
+  $('bpm').textContent = (60000 / (slope * 24)).toFixed(4) + ' BPM';
   $('jitter').innerHTML = `<span class="${sigma < 0.5 ? 'ok' : sigma < 2 ? 'warn' : 'bad'}">`
     + sigma.toFixed(3) + ' ms</span>';
   $('worst').innerHTML = `<span class="${worst < 3 ? 'ok' : worst < 10 ? 'warn' : 'bad'}">`
@@ -105,8 +116,11 @@ function onMessage(event) {
       const gap = at - lastTick;
       // Anything past 1.8x the running mean is a tick that did not arrive, not a slow one.
       const mean = intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : gap;
-      if (gap > mean * 1.8 && intervals.length > 8) dropped++;
-      else { intervals.push(gap); if (intervals.length > 480) intervals.shift(); }
+      if (gap > mean * 1.8 && intervals.length > 8) { dropped++; stamps.length = 0; }
+      else {
+        intervals.push(gap); if (intervals.length > 480) intervals.shift();
+        stamps.push(at); if (stamps.length > 480) stamps.shift();
+      }
     }
     lastTick = at;
     if (ticks % 12 === 0) stats();
@@ -114,6 +128,7 @@ function onMessage(event) {
   }
 
   lastTick = null;                                  // a transport message breaks the tick chain
+  stamps.length = 0;                                // and with it the fit
   if (status === 0xF2) {
     sawSpp = true;
     const sixteenths = bytes[1] | (bytes[2] << 7);
