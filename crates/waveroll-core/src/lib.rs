@@ -11,10 +11,12 @@ pub mod grid;
 pub mod ring;
 pub mod smf;
 pub mod tempo;
+pub mod view;
 pub mod wav;
 
 pub use clock::{CaptureClock, ClockPll, ClockSource, Transport};
 pub use grid::{Selection, Unit};
 pub use ring::{Producer, Reader, ring};
 pub use tempo::{Meter, TempoMap};
+pub use view::{View, Viewport};
 pub use wav::{Acid, Bext, Depth, WavMeta, WavSpec};

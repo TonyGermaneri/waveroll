@@ -9,8 +9,10 @@
 //! is `wgpu`'s own shading language and they already targeted WebGPU.
 
 pub mod device;
+pub mod envelope;
 pub mod fft;
 pub mod reference;
 
 pub use device::Gpu;
+pub use envelope::{Envelope, EnvelopePass, RingMirror};
 pub use fft::Analyzer;
