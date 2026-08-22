@@ -13,6 +13,7 @@ use waveroll_core::view::{View, Viewport};
 use waveroll_gpu::device::Gpu;
 use waveroll_gpu::envelope::{EnvelopePass, RingMirror};
 use waveroll_gpu::render::{Style, Target, WaveformPass, TARGET_FORMAT};
+use waveroll_gpu::wgpu;
 
 const SR: u32 = 48_000;
 const CAPACITY: usize = 1 << 21;
@@ -272,4 +273,40 @@ fn the_head_is_drawn_over_everything_else() {
         "the head was buried under the grid: {head:?}"
     );
     assert!(head[0] > head[2], "the head should read red, not as the bluish grid: {head:?}");
+}
+
+// ---------------------------------------------------------------------------------------
+// Not taking the host down
+// ---------------------------------------------------------------------------------------
+
+#[test]
+fn a_validation_error_is_recorded_rather_than_fatal() {
+    let Some(gpu) = gpu() else { return };
+    // This is the shape of the bug that crashed Ableton: a surface configured past the device's
+    // texture limit. It used to reach a panicking error handler, and a panic crossing the C
+    // boundary aborts the process -- which is somebody's DAW.
+    let limit = gpu.max_surface();
+    assert!(limit >= 8192, "the requested limits should allow a large editor, got {limit}");
+
+    // Provoke one deliberately, and assert it lands in the record instead of the floor.
+    let too_big = limit + 1024;
+    gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let _ = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("deliberately too large"),
+        size: wgpu::Extent3d { width: too_big, height: 16, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: TARGET_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let scoped = pollster_block(gpu.device.pop_error_scope());
+    assert!(scoped.is_some(), "the device should have refused a {too_big}px texture");
+    println!("device refused {too_big}px and reported it rather than aborting");
+}
+
+/// The device's own blocking poll, so the test needs no async runtime.
+fn pollster_block<F: std::future::Future>(future: F) -> F::Output {
+    waveroll_gpu::device::block_on(future)
 }

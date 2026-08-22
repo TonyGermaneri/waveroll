@@ -101,8 +101,24 @@ impl View {
     }
 
     pub fn resize(&mut self, width: u32, height: u32, scale: f64) {
-        let size = (width.max(1), height.max(1));
-        self.scale = scale.max(0.5);
+        // Clamped against what the device will actually accept. A window can be dragged bigger
+        // than any texture limit, and configuring a surface past one is a validation error on a
+        // path with nowhere to report it -- which is how this took a host down.
+        //
+        // The scale comes down with it rather than the aspect changing: a very large editor draws
+        // slightly softer, which nobody notices, instead of drawing the wrong shape, which
+        // everybody does.
+        let max = self.gpu.max_surface().max(256);
+        let (mut width, mut height) = (width.max(1), height.max(1));
+        let mut scale = scale.max(0.5);
+        if width > max || height > max {
+            let shrink = f64::from(max) / f64::from(width.max(height));
+            width = ((f64::from(width) * shrink) as u32).max(1);
+            height = ((f64::from(height) * shrink) as u32).max(1);
+            scale *= shrink;
+        }
+        let size = (width, height);
+        self.scale = scale;
         if self.size == size {
             return;
         }
@@ -174,5 +190,10 @@ impl View {
 
     pub fn describe(&self) -> String {
         self.gpu.describe()
+    }
+
+    /// Validation errors since the last call. Something has to look at these.
+    pub fn take_errors(&self) -> Vec<String> {
+        self.gpu.take_errors()
     }
 }

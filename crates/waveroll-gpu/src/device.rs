@@ -8,7 +8,7 @@
 
 use std::future::Future;
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
@@ -44,6 +44,7 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    errors: Arc<Mutex<Vec<String>>>,
     /// Kept because surface capabilities are asked of the adapter, not the device, and a caller
     /// that has one of these should not have to have held on to the other.
     pub adapter: wgpu::Adapter,
@@ -76,22 +77,37 @@ impl Gpu {
                 // Nothing here needs an optional feature. Asking for none keeps the same code path
                 // on WebGPU, where most of them do not exist.
                 required_features: wgpu::Features::empty(),
-                // downlevel_defaults rather than the adapter's own limits, so a shader that only
-                // works on a generous desktop GPU fails here rather than in a browser.
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                // `defaults()` rather than `downlevel_defaults()`, and the difference is not
+                // academic: downlevel caps a 2D texture at 2048 px, which a resizable plugin
+                // editor passes at about 1024 points on a 2x display. The surface then fails
+                // validation on resize. `defaults()` allows 8192 and is still the conservative
+                // WebGPU baseline rather than whatever this particular adapter happens to offer.
+                required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
                 ..Default::default()
             })
             .await
             .map_err(|e| format!("no GPU device: {e}"))?;
 
-        // A validation error inside a compute pass is otherwise reported by wgpu and then ignored,
-        // which turns "the shader did not run" into "the output buffer is still zeros" — a wrong
-        // answer rather than a failure.
-        device.on_uncaptured_error(Box::new(|error| {
-            panic!("wgpu validation error: {error}");
+        // Recorded, never panicked on.
+        //
+        // This used to panic, on the reasoning that a validation error otherwise turns "the shader
+        // did not run" into "the output buffer is still zeros" -- a wrong answer rather than a
+        // failure. That reasoning holds in a test and is catastrophic in a plugin: the panic
+        // crosses the C boundary, Rust aborts because it cannot unwind through it, and the host
+        // dies. It took Ableton down. The error is kept for whoever asks instead, and tests assert
+        // on it explicitly.
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&errors);
+        device.on_uncaptured_error(Box::new(move |error| {
+            if let Ok(mut sink) = sink.lock() {
+                // Bounded: a failure that repeats every frame must not become a memory leak.
+                if sink.len() < 32 {
+                    sink.push(error.to_string());
+                }
+            }
         }));
 
-        Ok(Gpu { device, queue, adapter, info })
+        Ok(Gpu { device, queue, adapter, info, errors })
     }
 
     /// Opens a device with no surface attached, blocking until it is ready. Native only — under
@@ -99,6 +115,21 @@ impl Gpu {
     pub fn headless() -> Result<Gpu, String> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
         block_on(Gpu::open(&instance, None))
+    }
+
+    /// Validation errors seen since the last call, and clears them.
+    ///
+    /// Something has to look at these or they are no better than the silence they replaced.
+    pub fn take_errors(&self) -> Vec<String> {
+        self.errors.lock().map(|mut e| std::mem::take(&mut *e)).unwrap_or_default()
+    }
+
+    /// The largest surface this device will accept, in pixels.
+    ///
+    /// Asked rather than assumed: a window can be dragged bigger than any limit, and a surface
+    /// configured past one is a validation error on a path with no way to report it.
+    pub fn max_surface(&self) -> u32 {
+        self.device.limits().max_texture_dimension_2d
     }
 
     pub fn describe(&self) -> String {
