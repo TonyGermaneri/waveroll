@@ -1,5 +1,7 @@
 #include "PluginEditor.h"
 
+namespace waveroll { const char* buildStamp(); }
+
 WaverollEditor::WaverollEditor (WaverollProcessor& p)
     : AudioProcessorEditor (&p), plugin (p)
 {
@@ -32,7 +34,12 @@ void WaverollEditor::paint (juce::Graphics& g)
     g.fillAll (juce::Colour (0xff0b0e13));
     g.setColour (juce::Colour (0xff6b7484));
     g.setFont (juce::FontOptions (12.0f));
-    g.drawText ("WAVEROLL", getLocalBounds().removeFromTop (34), juce::Justification::centred);
+    auto top = getLocalBounds().removeFromTop (34);
+    g.drawText ("WAVEROLL", top, juce::Justification::centred);
+    // Which build this is, so "am I running the one I just built" is answerable by looking.
+    g.setColour (juce::Colour (0xff3a434f));
+    g.setFont (juce::FontOptions (10.0f));
+    g.drawText (waveroll::buildStamp(), top.reduced (8, 0), juce::Justification::centredRight);
 }
 
 void WaverollEditor::resized()

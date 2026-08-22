@@ -62,7 +62,34 @@ add_custom_target(waveroll_rust ALL
 add_library(waveroll_ffi INTERFACE)
 target_link_libraries(waveroll_ffi INTERFACE "${WAVEROLL_RUST_LIB}")
 
+# The stamp is regenerated on every build and lands in its own translation unit, so a changed
+# stamp recompiles one small file rather than the editor.
+set(WAVEROLL_STAMP "${CMAKE_CURRENT_BINARY_DIR}/BuildStamp.cpp")
+add_custom_target(waveroll_stamp ALL
+  COMMAND ${CMAKE_COMMAND}
+          -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+          -DOUT=${WAVEROLL_STAMP}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildStamp.cmake
+  BYPRODUCTS ${WAVEROLL_STAMP}
+  COMMENT "Stamping the build"
+  VERBATIM)
+# Generated before the first build, so the first configure has something to compile.
+execute_process(COMMAND ${CMAKE_COMMAND}
+  -DSOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -DOUT=${WAVEROLL_STAMP}
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildStamp.cmake)
+
+# The plugin's own version tracks the commit count, so Live's plugin info says which commit a
+# binary came from rather than 0.1.0 forever.
+find_package(Git QUIET)
+set(WAVEROLL_BUILD 0)
+if(GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-list --count HEAD
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} OUTPUT_VARIABLE WAVEROLL_BUILD
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+endif()
+
 juce_add_plugin(Waveroll
+  VERSION 0.1.${WAVEROLL_BUILD}
   COMPANY_NAME "Waveroll"
   PLUGIN_MANUFACTURER_CODE Wvrl
   PLUGIN_CODE Wvr1
@@ -77,7 +104,8 @@ juce_add_plugin(Waveroll
 
 target_sources(Waveroll PRIVATE
   Source/PluginProcessor.cpp
-  Source/PluginEditor.cpp)
+  Source/PluginEditor.cpp
+  ${WAVEROLL_STAMP})
 
 target_include_directories(Waveroll PRIVATE include)
 
@@ -91,7 +119,7 @@ target_compile_definitions(Waveroll PUBLIC
 # copy of the unwinder along, and if it lands ahead of the C++ runtime on the link line the
 # resolution of __cxa_init_primary_exception goes to the wrong one and fails with a bare
 # "symbol(s) not found".
-add_dependencies(Waveroll waveroll_rust)
+add_dependencies(Waveroll waveroll_rust waveroll_stamp)
 
 target_link_libraries(Waveroll PRIVATE
   juce::juce_audio_utils
