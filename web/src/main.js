@@ -9,6 +9,7 @@
 
 import init, { Waveroll } from '../pkg/waveroll_wasm.js';
 import { AudioRing, RingReader } from './ring.js';
+import { DropFolder, supported as dropSupported } from './dropfolder.js';
 
 const $ = (id) => document.getElementById(id);
 const canvas = $('canvas');
@@ -32,6 +33,7 @@ const state = {
   demo: null,
   staged: null,
   status: null,
+  drop: new DropFolder(),
 };
 
 // ---------------------------------------------------------------------------------------
@@ -242,8 +244,23 @@ function resize() {
 
 function frame() {
   requestAnimationFrame(frame);
+  try {
+    paint();
+  } catch (error) {
+    // A frame that throws every 16 ms would otherwise fill the console and stop the picture with
+    // no visible cause. Say it once, on screen, and stop asking.
+    if (!state.broken) {
+      state.broken = String(error);
+      $('adapter').textContent = `render stopped: ${state.broken}`;
+      $('adapter').style.color = '#ff8d7d';
+      console.error('waveroll frame failed', error);
+    }
+  }
+}
+
+function paint() {
   const wr = state.wr;
-  if (!wr) return;
+  if (!wr || state.broken) return;
   resize();
 
   // The clock has gone quiet: fall back to the internal transport rather than freezing on a tempo
@@ -515,7 +532,32 @@ function stage() {
   chip.download = name;
   $('tray').hidden = false;
   note(`staged ${name}`);
+
+  // If a drop folder is set, the file goes where the DAW is already looking. This is the whole
+  // web workflow: the page cannot hand Live a path, but Live indexes its own User Library, so a
+  // take written there shows up in Live's browser and is dragged from there natively.
+  if (state.drop.name) {
+    state.drop
+      .write(name, bytes)
+      .then((written) => note(`${written} → ${state.drop.name}, now in the DAW browser`))
+      .catch((error) => note(`could not write to the drop folder: ${error.message}`));
+  }
   return true;
+}
+
+async function chooseDropFolder() {
+  if (!dropSupported) {
+    note('this browser has no File System Access API — Chrome and Edge do');
+    return;
+  }
+  try {
+    const name = await state.drop.choose();
+    $('drop').textContent = `→ ${name}`;
+    $('drop').dataset.on = '1';
+    note(`takes will be written to ${name}`);
+  } catch (error) {
+    if (error.name !== 'AbortError') note(String(error));
+  }
 }
 
 /**
@@ -580,6 +622,17 @@ function note(text) {
 $('run').addEventListener('click', toggleRun);
 $('hold').addEventListener('click', toggleHold);
 $('discard').addEventListener('click', discard);
+$('drop').addEventListener('click', chooseDropFolder);
+// A folder chosen in an earlier session comes back without a prompt when permission survived;
+// otherwise the button says so and one click re-authorises it.
+state.drop.restore().then((ready) => {
+  if (ready) {
+    $('drop').textContent = `→ ${state.drop.name}`;
+    $('drop').dataset.on = '1';
+  } else if (state.drop.pending) {
+    $('drop').textContent = `→ ${state.drop.pending.name} (click to allow)`;
+  }
+});
 $('chip').addEventListener('click', (event) => {
   // The anchor's own download would fire anyway; this only keeps the message consistent.
   event.preventDefault();

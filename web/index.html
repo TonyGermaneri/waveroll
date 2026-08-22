@@ -25,6 +25,9 @@
   #tray { position: fixed; right: 14px; top: 14px; display: flex; align-items: center; gap: 6px;
     background: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 6px 8px;
     box-shadow: 0 8px 26px -10px #000; }
+  /* An author `display` beats the UA stylesheet's `display: none` for [hidden], so a flex
+     container with a hidden attribute is still visible. This is the whole fix. */
+  #tray[hidden] { display: none; }
   #chip { color: var(--accent); text-decoration: none; cursor: grab; user-select: none;
     padding: 2px 6px; border-radius: 3px; }
   #chip:hover { background: #2a2313; }
@@ -81,6 +84,7 @@
   <span><b>sel</b><span id="sel">—</span></span>
   <span><b>marks</b><span id="marks">0</span></span>
   <button id="hold">Hold</button>
+  <button id="drop" title="Write takes into a folder the DAW watches">Set drop folder…</button>
   <span><b>tempo</b><input id="bpmIn" type="number" value="120" min="20" max="300" step="0.01"
     style="width:74px;font:inherit;background:#1d232d;color:var(--ink);border:1px solid #39424f;
     border-radius:3px;padding:2px 4px"></span>
@@ -100,12 +104,13 @@
     <p style="color:var(--ink-3)">drag to select · click for one cell · <code>1-0</code> last N×10%
       · <code>\</code> fit · wheel to zoom · <code>space</code> run · <code>d</code> set downbeat<br>
       <code>h</code> hold · <code>m</code> mark · <code>n</code> select from last mark</p>
-    <p><b style="color:var(--ink)">To take it: press <code>c</code>, then drag the file from your
-      browser downloads.</b>
-      <span style="color:var(--ink-3)">Dragging straight from the selection works into Finder but
-      <em>not</em> into Ableton: a web page can only offer a file promise, never a path, and no API
-      changes that. The desktop build hands over a real path and drags in one gesture. Dragging
-      outside the selection makes a new one; <code>alt</code> forces one even over the old.</span></p>
+    <p><b style="color:var(--ink)">Set a drop folder inside Live's User Library, once.</b>
+      <span style="color:var(--ink-3)">Then <code>c</code> writes each take straight into it and it
+      appears in Live's own browser, where you drag it into the arrangement natively. A web page
+      cannot hand another application a file path — only a promise, which Ableton declines — so it
+      puts the file where the DAW is already looking instead. Dragging from the selection still
+      works into Finder. Dragging outside the selection makes a new one; <code>alt</code> forces
+      one even over the old.</span></p>
     <p style="margin-top:20px"><select id="device" style="max-width:34ch"><option value="">Default input</option></select></p>
     <button id="begin">Use my input</button>
     <button id="demo" style="margin-left:8px">Demo signal</button>

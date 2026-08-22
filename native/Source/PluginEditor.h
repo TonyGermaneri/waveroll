@@ -40,11 +40,10 @@ private:
     /** Writes the file that will be dragged, returning its path. */
     juce::File materialise();
 
-    WaverollProcessor& processor;
+    WaverollProcessor& plugin;
     DragSource source { *this };
     juce::Label status;
     juce::File staged;
-    juce::TemporaryFile* keepAlive = nullptr;
 
     friend class DragSource;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollEditor)

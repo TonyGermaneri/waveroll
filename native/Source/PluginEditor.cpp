@@ -1,7 +1,7 @@
 #include "PluginEditor.h"
 
 WaverollEditor::WaverollEditor (WaverollProcessor& p)
-    : AudioProcessorEditor (&p), processor (p)
+    : AudioProcessorEditor (&p), plugin (p)
 {
     addAndMakeVisible (source);
     status.setJustificationType (juce::Justification::centred);
@@ -35,11 +35,11 @@ void WaverollEditor::resized()
 
 void WaverollEditor::timerCallback()
 {
-    const auto captured = processor.snapshot.captured.load();
-    const auto rate = processor.snapshot.sampleRate.load();
-    status.setText (juce::String (processor.snapshot.playing.load() ? "capturing" : "stopped")
-                        + (processor.snapshot.offline.load() ? "  (offline render - not captured)" : "")
-                        + "   " + juce::String (processor.snapshot.bpm.load(), 2) + " BPM"
+    const auto captured = plugin.snapshot.captured.load();
+    const auto rate = plugin.snapshot.sampleRate.load();
+    status.setText (juce::String (plugin.snapshot.playing.load() ? "capturing" : "stopped")
+                        + (plugin.snapshot.offline.load() ? "  (offline render - not captured)" : "")
+                        + "   " + juce::String (plugin.snapshot.bpm.load(), 2) + " BPM"
                         + "   " + juce::String (captured / juce::jmax (1.0, rate), 1) + " s captured",
                     juce::dontSendNotification);
 }
@@ -53,8 +53,8 @@ void WaverollEditor::timerCallback()
  */
 juce::File WaverollEditor::materialise()
 {
-    const auto rate = processor.snapshot.sampleRate.load();
-    const auto bpm = processor.snapshot.bpm.load();
+    const auto rate = plugin.snapshot.sampleRate.load();
+    const auto bpm = plugin.snapshot.bpm.load();
     const int frames = (int) std::round (rate * (240.0 / juce::jmax (20.0, bpm)));  // four bars of 4/4
 
     juce::AudioBuffer<float> buffer (2, frames);
@@ -118,6 +118,7 @@ void WaverollEditor::DragSource::mouseDrag (const juce::MouseEvent& event)
     // no error anywhere.
     juce::StringArray files;
     files.add (editor.staged.getFullPathName());
-    performExternalDragDropOfFiles (files, /* canMoveFiles */ false, this,
-                                    [this] (void) { dragging = false; repaint(); });
+    juce::DragAndDropContainer::performExternalDragDropOfFiles (
+        files, /* canMoveFiles */ false, this,
+        [this] { dragging = false; repaint(); });
 }
