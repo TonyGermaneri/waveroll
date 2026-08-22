@@ -41,6 +41,7 @@ public:
         void mouseDrag (const juce::MouseEvent&) override;
         void mouseUp (const juce::MouseEvent&) override;
         void mouseMove (const juce::MouseEvent&) override;
+        void mouseWheelMove (const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
 
         juce::String describe() const;
         bool ready() const noexcept { return gpuView != nullptr; }

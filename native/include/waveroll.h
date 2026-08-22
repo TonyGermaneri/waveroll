@@ -67,6 +67,12 @@ const uint8_t* wr_staged_midi_bytes (void* core);
 void     wr_set_width (void* core, uint32_t width);
 void     wr_set_window_bars (void* core, double bars);
 void     wr_set_unit (void* core, double bars);   /**< 0 means auto */
+/** Step the quantise setting along the ladder; returns the new unit in bars, 0 for auto. */
+double   wr_cycle_unit (void* core, int32_t direction);
+/** Step the window length; returns the new length in bars. */
+double   wr_cycle_window (void* core, int32_t direction);
+void     wr_zoom (void* core, double factor, double anchor);
+void     wr_home (void* core);
 
 void     wr_click (void* core, double fraction);
 void     wr_drag (void* core, double from, double to);

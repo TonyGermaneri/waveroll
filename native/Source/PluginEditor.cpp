@@ -14,8 +14,8 @@ WaverollEditor::WaverollEditor (WaverollProcessor& p)
     hint.setJustificationType (juce::Justification::centredRight);
     hint.setColour (juce::Label::textColourId, juce::Colour (0xff4a5262));
     hint.setFont (juce::FontOptions (11.0f));
-    hint.setText ("drag inside the selection to take it  .  1-0 last N x 10%  .  m mark  .  "
-                  "n from mark  .  h hold  .  d downbeat",
+    hint.setText ("drag inside to take it  .  1-0 last N x 10%  .  , . grid  .  [ ] window  .  "
+                  "scroll to zoom  .  \\ fit  .  m mark  .  n from mark  .  h hold  .  d downbeat",
                   juce::dontSendNotification);
     addAndMakeVisible (hint);
 
@@ -101,11 +101,17 @@ bool WaverollEditor::keyPressed (const juce::KeyPress& key)
     }
     switch (character)
     {
-        case 'm': wr_mark (core); return true;
-        case 'n': wr_select_from_marker (core); return true;
-        case 'h': wr_hold (core, ! held); held = ! held; return true;
-        case 'd': wr_set_downbeat_now (core); return true;
-        default: break;
+        case 'm':  wr_mark (core); return true;
+        case 'n':  wr_select_from_marker (core); return true;
+        case 'h':  wr_hold (core, ! held); held = ! held; return true;
+        case 'd':  wr_set_downbeat_now (core); return true;
+        // The grid, on the pair of keys that sit next to each other, left finer and right coarser.
+        case ',':  wr_cycle_unit (core, -1); return true;
+        case '.':  wr_cycle_unit (core, +1); return true;
+        case '[':  wr_cycle_window (core, -1); return true;
+        case ']':  wr_cycle_window (core, +1); return true;
+        case '\\': wr_home (core); return true;
+        default:   break;
     }
     if (key == juce::KeyPress::escapeKey)
     {
@@ -273,6 +279,17 @@ bool WaverollEditor::Canvas::overSelection (const juce::MouseEvent& event) const
     const auto at = fractionOf (event);
     return at >= juce::jmin (s.selection_from, s.selection_to)
         && at <= juce::jmax (s.selection_from, s.selection_to);
+}
+
+void WaverollEditor::Canvas::mouseWheelMove (const juce::MouseEvent& event,
+                                             const juce::MouseWheelDetails& wheel)
+{
+    auto* core = editor.plugin.core();
+    if (core == nullptr)
+        return;
+    // Anchored on the pointer, never on the write head: anchor it to the head and the view chases,
+    // and you can never hold still on the thing you were looking at.
+    wr_zoom (core, std::exp (wheel.deltaY * 2.0), fractionOf (event));
 }
 
 void WaverollEditor::Canvas::mouseMove (const juce::MouseEvent& event)

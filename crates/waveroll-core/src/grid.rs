@@ -90,6 +90,42 @@ pub fn nearest_rung(bars: f64) -> f64 {
     best
 }
 
+/// Steps the quantise setting along the ladder.
+///
+/// Auto sits one step below the finest rung rather than off to one side, so the whole setting is a
+/// single line the user walks: auto, 1/32, 1/16, and up. A separate toggle for auto would mean
+/// remembering which of two controls you last touched.
+pub fn cycle_unit(current: Unit, direction: i32) -> Unit {
+    let at = match current {
+        Unit::Auto => 0i32,
+        Unit::Fixed(bars) => {
+            let rung = nearest_rung(bars);
+            LADDER.iter().position(|r| *r == rung).map_or(0, |i| i as i32 + 1)
+        }
+    };
+    let next = (at + direction.signum()).clamp(0, LADDER.len() as i32);
+    if next == 0 { Unit::Auto } else { Unit::Fixed(LADDER[(next - 1) as usize]) }
+}
+
+/// Window lengths the `[` and `]` keys step through, in bars.
+///
+/// Powers of two because a lap that is a power of two of bars keeps every coarser grid line
+/// landing on a lap boundary, so widening the window never puts the wrap in the middle of a bar
+/// group.
+pub const WINDOWS: [f64; 6] = [4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
+
+/// Steps the window length along [`WINDOWS`], to the nearest entry first.
+pub fn cycle_window(current: f64, direction: i32) -> f64 {
+    let at = WINDOWS
+        .iter()
+        .enumerate()
+        .min_by(|(_, a), (_, b)| {
+            (*a - current).abs().partial_cmp(&(*b - current).abs()).expect("finite")
+        })
+        .map_or(2, |(i, _)| i) as i32;
+    WINDOWS[(at + direction.signum()).clamp(0, WINDOWS.len() as i32 - 1) as usize]
+}
+
 /// A selected span of capture time, as absolute frame indices, half-open.
 ///
 /// Frames rather than screen coordinates, so a selection survives the write head sweeping through
@@ -262,6 +298,47 @@ mod tests {
             let unit = auto_unit(bars, px, AUTO_TARGET_PX);
             assert!(LADDER.contains(&unit), "{unit} is not a rung");
         }
+    }
+
+    #[test]
+    fn the_quantise_setting_walks_one_line_ending_at_auto() {
+        // Down from the finest rung reaches auto, and stops there rather than wrapping round to
+        // the coarsest -- a setting that wraps is one you overshoot.
+        let mut unit = Unit::Fixed(4.0);
+        let mut seen = Vec::new();
+        for _ in 0..12 {
+            unit = cycle_unit(unit, -1);
+            seen.push(unit);
+        }
+        assert_eq!(seen[0], Unit::Fixed(2.0));
+        assert_eq!(*seen.last().expect("steps"), Unit::Auto);
+        assert_eq!(seen.iter().filter(|u| **u == Unit::Auto).count(), 5, "it stays at auto");
+
+        // And up from auto reaches the finest rung, then climbs, then stops.
+        let mut unit = Unit::Auto;
+        unit = cycle_unit(unit, 1);
+        assert_eq!(unit, Unit::Fixed(LADDER[0]));
+        for _ in 0..20 {
+            unit = cycle_unit(unit, 1);
+        }
+        assert_eq!(unit, Unit::Fixed(4.0), "it stops at the coarsest rung");
+    }
+
+    #[test]
+    fn an_off_ladder_unit_steps_from_the_nearest_rung() {
+        // A value out of persisted settings or a MIDI binding need not be on the ladder; stepping
+        // from it should still land somewhere sensible rather than resetting to the end.
+        assert_eq!(cycle_unit(Unit::Fixed(0.3), 1), Unit::Fixed(0.5));
+        assert_eq!(cycle_unit(Unit::Fixed(0.3), -1), Unit::Fixed(0.125));
+    }
+
+    #[test]
+    fn the_window_steps_through_powers_of_two_and_stops() {
+        assert_eq!(cycle_window(16.0, 1), 32.0);
+        assert_eq!(cycle_window(16.0, -1), 8.0);
+        assert_eq!(cycle_window(4.0, -1), 4.0, "it stops rather than wrapping");
+        assert_eq!(cycle_window(128.0, 1), 128.0);
+        assert_eq!(cycle_window(20.0, 1), 32.0, "an odd window steps from the nearest entry");
     }
 
     #[test]

@@ -215,6 +215,52 @@ pub extern "C" fn wr_capture(
     })
 }
 
+/// Steps the quantise setting along the ladder. Returns the new unit in bars, or 0 for auto.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_cycle_unit(core: *mut c_void, direction: i32) -> f64 {
+    guard(0.0, || {
+        let core = core_ref!(core, 0.0);
+        core.unit = grid::cycle_unit(core.unit, direction);
+        // Fit is home, and changing the quantise setting comes back to it -- in auto the unit is
+        // derived from the zoom, so changing the setting anywhere else would pick a unit from
+        // wherever the view happened to be.
+        core.view.home();
+        match core.unit {
+            Unit::Auto => 0.0,
+            Unit::Fixed(bars) => bars,
+        }
+    })
+}
+
+/// Steps the window length. Returns the new length in bars.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_cycle_window(core: *mut c_void, direction: i32) -> f64 {
+    guard(0.0, || {
+        let core = core_ref!(core, 0.0);
+        core.view.window_bars = grid::cycle_window(core.view.window_bars, direction);
+        core.view.clamp();
+        core.view.window_bars
+    })
+}
+
+/// Zooms about a point given as a fraction of the width.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_zoom(core: *mut c_void, factor: f64, anchor: f64) {
+    guard((), || {
+        let core = core_ref!(core, ());
+        core.view.zoom_about(factor, anchor);
+    })
+}
+
+/// Fit to width, which is home.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_home(core: *mut c_void) {
+    guard((), || {
+        let core = core_ref!(core, ());
+        core.view.home();
+    })
+}
+
 /// Captures one MIDI event, stamped by its offset within the block just given to [`wr_capture`].
 ///
 /// Call after `wr_capture` for the same block. Real-time safe, and silently does nothing when the
