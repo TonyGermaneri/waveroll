@@ -137,6 +137,54 @@ impl Viewport {
         (bars - self.left_bars) / self.span_bars
     }
 
+    /// Where a bar position is *shown*, which is not where it is.
+    ///
+    /// The display wraps: audio to the right of the write head belongs to the previous lap and is
+    /// therefore a whole window behind in absolute bars. Anything drawn from an absolute position
+    /// -- a selection, a marker -- has to be moved forward by a window to land where its audio
+    /// actually appears. Without this a selection made in the old half is placed off the left edge
+    /// while the audio it points at is plainly visible on the right, which reads as the click
+    /// having done nothing at all.
+    ///
+    /// `None` when the position is not on screen in either half.
+    pub fn displayed_bars(&self, bars: f64) -> Option<f64> {
+        if bars >= self.lap_start_bars && bars <= self.head_bars {
+            return Some(bars);
+        }
+        if bars >= self.head_bars - self.window_bars && bars < self.lap_start_bars {
+            return Some(bars + self.window_bars);
+        }
+        None
+    }
+
+    /// Canvas fraction for a bar position, resolving the wrap. `None` when it is not shown.
+    pub fn fraction_of(&self, bars: f64) -> Option<f64> {
+        self.displayed_bars(bars).map(|shown| self.fraction_at(shown))
+    }
+
+    /// The on-screen spans covering `from_bars..to_bars`.
+    ///
+    /// Up to two, because a range straddling the lap boundary is drawn in two places: the part
+    /// still in the old half on the right, and the part already re-recorded on the left. Drawing
+    /// it as one rectangle from the first fraction to the last would cover the entire screen.
+    pub fn spans_for(&self, from_bars: f64, to_bars: f64) -> Vec<(f64, f64)> {
+        let (from, to) = if from_bars <= to_bars { (from_bars, to_bars) } else { (to_bars, from_bars) };
+        let mut spans = Vec::new();
+        let mut push = |a: f64, b: f64| {
+            if b > a
+                && let (Some(x), Some(y)) = (self.fraction_of(a), self.fraction_of(b - 1e-9))
+            {
+                spans.push((x, self.fraction_at(self.displayed_bars(a).expect("checked") + (b - a))
+                    .max(y)));
+            }
+        };
+        // The old half, then the new one, so they are drawn left to right on screen.
+        let boundary = self.lap_start_bars;
+        push(from.max(self.head_bars - self.window_bars), to.min(boundary));
+        push(from.max(boundary), to.min(self.head_bars));
+        spans
+    }
+
     /// Where the write head sits, as a canvas fraction.
     pub fn head_fraction(&self) -> f64 {
         self.fraction_at(self.head_bars)
@@ -514,5 +562,75 @@ mod tests {
             );
             assert!((vp.lap_start_bars % 16.0).abs() < 1e-6, "lap start is not on a bar line");
         }
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+    use crate::tempo::Meter;
+
+    const SR: u32 = 48_000;
+
+    fn setup(head_bars: f64) -> (TempoMap, Viewport) {
+        let m = TempoMap::new(SR, 120.0, Meter::FOUR_FOUR);
+        let vp = Viewport::resolve(&View::new(16.0), &m, m.frame_at_bars(head_bars), 1600);
+        (m, vp)
+    }
+
+    #[test]
+    fn the_old_half_is_shown_on_the_right_not_off_the_left() {
+        // Four bars into lap 1: the left quarter is new, the right three quarters still show lap 0.
+        let (_m, vp) = setup(20.0);
+        assert_eq!(vp.lap, 1);
+
+        // Absolute bar 10 belongs to lap 0 and is displayed three eighths across.
+        let shown = vp.fraction_of(10.0).expect("bar 10 is on screen");
+        assert!((shown - 10.0 / 16.0).abs() < 1e-9, "bar 10 should be at 62.5%, got {shown}");
+        // The naive answer, which is what the bug was.
+        assert!(vp.fraction_at(10.0) < 0.0, "linearly it lands off the left edge");
+    }
+
+    #[test]
+    fn the_new_half_is_where_it_says_it_is() {
+        let (_m, vp) = setup(20.0);
+        let shown = vp.fraction_of(18.0).expect("bar 18 is on screen");
+        assert!((shown - 2.0 / 16.0).abs() < 1e-9, "two bars into the lap, got {shown}");
+    }
+
+    #[test]
+    fn a_position_the_head_has_swept_past_is_no_longer_shown() {
+        let (_m, vp) = setup(20.0);
+        // Bar 2 of lap 0 was overwritten by bar 18 of lap 1, which is now in its place.
+        assert_eq!(vp.fraction_of(2.0), None, "covered by the new lap");
+        assert!(vp.fraction_of(6.0).is_some(), "not yet reached");
+    }
+
+    #[test]
+    fn a_range_straddling_the_lap_boundary_is_drawn_in_two_places() {
+        let (_m, vp) = setup(20.0);
+        // Bars 14 to 18 span the wrap: 14-16 is the far right, 16-18 the far left.
+        let spans = vp.spans_for(14.0, 18.0);
+        assert_eq!(spans.len(), 2, "got {spans:?}");
+        let (right, left) = (spans[0], spans[1]);
+        assert!(right.0 > 0.8, "the old part is at the right edge: {right:?}");
+        assert!(left.0 < 0.01, "the new part starts at the left edge: {left:?}");
+        // Drawn as one rectangle it would have covered the entire screen.
+        assert!(right.1 - right.0 < 0.2 && left.1 - left.0 < 0.2);
+    }
+
+    #[test]
+    fn a_range_wholly_in_one_half_is_one_span() {
+        let (_m, vp) = setup(20.0);
+        assert_eq!(vp.spans_for(8.0, 12.0).len(), 1, "wholly in the old half");
+        assert_eq!(vp.spans_for(17.0, 19.0).len(), 1, "wholly in the new half");
+    }
+
+    #[test]
+    fn on_the_first_lap_nothing_wraps() {
+        let (_m, vp) = setup(6.0);
+        assert_eq!(vp.lap, 0);
+        assert!((vp.fraction_of(4.0).expect("shown") - 0.25).abs() < 1e-9);
+        assert_eq!(vp.fraction_of(10.0), None, "not captured yet");
     }
 }

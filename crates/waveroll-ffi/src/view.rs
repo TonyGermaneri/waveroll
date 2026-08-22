@@ -31,7 +31,8 @@ pub struct Frame<'a> {
     pub map: &'a TempoMap,
     pub viewport: &'a Viewport,
     pub unit_bars: f64,
-    pub selection: Option<(f64, f64)>,
+    /// Up to two spans, because the display wraps and a range can straddle the boundary.
+    pub selection: &'a [(f64, f64)],
     pub markers: &'a [f64],
     /// Held: leave the mirror unsynced so the picture is exactly what it was.
     pub held: bool,
@@ -174,8 +175,8 @@ impl View {
         grid::rulings(viewport, unit_bars, &mut self.rulings);
         self.overlay.begin(self.size);
         self.overlay.grid(&self.rulings, &self.overlay_style);
-        if let Some((from, to)) = selection {
-            self.overlay.selection(from, to, &self.overlay_style);
+        for (from, to) in selection {
+            self.overlay.selection(*from, *to, &self.overlay_style);
         }
         for marker in markers {
             if (0.0..=1.0).contains(marker) {

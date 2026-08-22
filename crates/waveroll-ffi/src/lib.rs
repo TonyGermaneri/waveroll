@@ -343,6 +343,27 @@ pub extern "C" fn wr_set_unit(core: *mut c_void, bars: f64) {
     })
 }
 
+/// Brings the selection up to date with the write head.
+///
+/// Called at the top of everything that reads the selection, so the editor and the exporter can
+/// never disagree about what is selected. Hold freezes it along with the picture: the whole point
+/// of holding is that what you were looking at stops moving.
+fn settle(core: &mut WrCore) {
+    if core.held_at.is_some() {
+        return;
+    }
+    let Some(selection) = core.selection else { return };
+    let vp = viewport(core);
+    let unit = unit_bars(core, &vp);
+    core.selection = grid::erode(
+        selection,
+        core.clock.map(),
+        core.clock.captured(),
+        core.view.window_bars,
+        unit,
+    );
+}
+
 fn viewport(core: &WrCore) -> Viewport {
     let head = core.held_at.unwrap_or_else(|| core.clock.captured());
     Viewport::resolve(&core.view, core.clock.map(), head, core.width)
@@ -526,6 +547,7 @@ pub extern "C" fn wr_status(core: *mut c_void, out: *mut WrStatus) {
     guard((), || {
         let core = core_ref!(core, ());
         let Some(out) = (unsafe { out.as_mut() }) else { return };
+        settle(core);
         let vp = viewport(core);
         let map = core.clock.map();
         let mut status = WrStatus {
@@ -544,8 +566,12 @@ pub extern "C" fn wr_status(core: *mut c_void, out: *mut WrStatus) {
             let (a, b) = (map.bars_at(selection.start), map.bars_at(selection.end));
             status.has_selection = true;
             status.selection_bars = b - a;
-            status.selection_from = vp.fraction_at(a);
-            status.selection_to = vp.fraction_at(b);
+            // Where it is *shown*, resolving the wrap. Reporting the linear position put a
+            // selection made in the old half off the left edge while the audio it points at sat
+            // plainly visible on the right — which reads as the click having done nothing.
+            let spans = vp.spans_for(a, b);
+            status.selection_from = spans.first().map_or(vp.fraction_at(a), |s| s.0);
+            status.selection_to = spans.last().map_or(vp.fraction_at(b), |s| s.1);
             status.selection_state = if selection.end > core.reader.head() {
                 1
             } else if !core.reader.holds(selection.start, selection.end) {
@@ -614,22 +640,26 @@ pub extern "C" fn wr_view_draw(core: *mut c_void, view: *mut c_void) {
         // The auto grid unit is chosen against apparent spacing, so the core reasons in points while
         // the surface is in pixels.
         core.width = view.logical_width().round().max(1.0) as u32;
+        settle(core);
         let vp = viewport(core);
         let unit = unit_bars(core, &vp);
         let map = core.clock.map();
 
-        let selection = core.selection.map(|s| {
-            (vp.fraction_at(map.bars_at(s.start)), vp.fraction_at(map.bars_at(s.end)))
-        });
+        // Up to two spans: a range straddling the lap boundary is drawn in both halves, and as one
+        // rectangle from the first fraction to the last it would cover the whole screen.
+        let selection = core
+            .selection
+            .map(|s| vp.spans_for(map.bars_at(s.start), map.bars_at(s.end)))
+            .unwrap_or_default();
         let markers: Vec<f64> =
-            core.markers.iter().map(|m| vp.fraction_at(map.bars_at(*m))).collect();
+            core.markers.iter().filter_map(|m| vp.fraction_of(map.bars_at(*m))).collect();
 
         view.draw(&view::Frame {
             reader: &core.reader,
             map,
             viewport: &vp,
             unit_bars: unit,
-            selection,
+            selection: &selection,
             markers: &markers,
             held: core.held_at.is_some(),
         });

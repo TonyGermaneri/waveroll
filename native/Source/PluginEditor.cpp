@@ -351,7 +351,11 @@ void WaverollEditor::Canvas::mouseDrag (const juce::MouseEvent& event)
 
 void WaverollEditor::Canvas::mouseUp (const juce::MouseEvent& event)
 {
-    if (auto* core = editor.plugin.core(); core != nullptr && ! moved && ! grabbing)
+    // A click that has not travelled is a click, wherever it landed -- including inside the
+    // current selection. Requiring `! grabbing` here swallowed every click inside the selection
+    // entirely, so after selecting with the number row the mouse appeared to stop working until
+    // the selection happened to move somewhere else.
+    if (auto* core = editor.plugin.core(); core != nullptr && ! moved)
         wr_click (core, fractionOf (event));
     grabbing = false;
     moved = false;

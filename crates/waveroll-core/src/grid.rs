@@ -141,6 +141,38 @@ impl Selection {
     pub fn is_empty(&self) -> bool { self.end <= self.start }
 }
 
+/// Trims a selection to what the display still holds, a whole cell at a time.
+///
+/// The write head eats the oldest end of the window as it sweeps. A selection reaching back into
+/// that end does not become wrong all at once — the part the head has not reached is still exactly
+/// the audio it was — so it gives up whole cells from the old end and keeps the rest. Discarding
+/// the lot the moment the head touched it would throw away material that is still there, and
+/// keeping the lot would hand over audio that has been recorded over.
+///
+/// Returns `None` once nothing whole is left, which is the point at which the selection really has
+/// gone rather than merely shrunk.
+pub fn erode(
+    selection: Selection,
+    map: &TempoMap,
+    head: u64,
+    window_bars: f64,
+    unit_bars: f64,
+) -> Option<Selection> {
+    let unit = guard_unit(unit_bars);
+    let oldest = map.bars_at(head) - window_bars;
+    let start = map.bars_at(selection.start);
+    if start >= oldest {
+        return Some(selection);
+    }
+    // Snapped up to a cell boundary, so what survives is still a whole number of cells and still
+    // loops. A ragged edge here would quietly turn a four-bar loop into a 3.87-bar one.
+    let trimmed = (oldest / unit).ceil() * unit;
+    if trimmed >= map.bars_at(selection.end) {
+        return None;
+    }
+    Some(Selection { start: map.frame_at_bars(trimmed), end: selection.end })
+}
+
 /// A click with no drag: the one cell containing `frame`.
 ///
 /// `[floor(t/u)·u, +u)` — the pointer is always inside the result, which is the property that makes
@@ -339,6 +371,52 @@ mod tests {
         assert_eq!(cycle_window(4.0, -1), 4.0, "it stops rather than wrapping");
         assert_eq!(cycle_window(128.0, 1), 128.0);
         assert_eq!(cycle_window(20.0, 1), 32.0, "an odd window steps from the nearest entry");
+    }
+
+    #[test]
+    fn a_selection_gives_up_whole_cells_as_the_head_reaches_it() {
+        let map = flat();
+        let bars = |n: f64| map.frame_at_bars(n);
+        // Four bars selected, and the head one lap plus a little further on, so the first bar of
+        // the selection has just been swept over.
+        let selection = Selection { start: bars(4.0), end: bars(8.0) };
+
+        let untouched = erode(selection, &map, bars(19.0), 16.0, 1.0).expect("still there");
+        assert_eq!(untouched, selection, "the head has not reached it yet");
+
+        let eaten = erode(selection, &map, bars(21.0), 16.0, 1.0).expect("partly there");
+        assert!((map.bars_at(eaten.start) - 5.0).abs() < 1e-6, "the first bar is gone, not all four");
+        assert_eq!(eaten.end, selection.end, "the far end is untouched");
+        let remaining = map.bars_at(eaten.end) - map.bars_at(eaten.start);
+        assert!((remaining - 3.0).abs() < 1e-6, "three bars left, got {remaining}");
+    }
+
+    #[test]
+    fn what_survives_erosion_is_still_whole_cells() {
+        let map = flat();
+        let bars = |n: f64| map.frame_at_bars(n);
+        let selection = Selection { start: bars(4.0), end: bars(8.0) };
+        // A head position that lands mid-cell: what is left must still start on a cell boundary,
+        // or a four-bar loop quietly becomes a 3.87-bar one.
+        for unit in [0.25, 0.5, 1.0, 2.0] {
+            let eroded = erode(selection, &map, bars(20.6), 16.0, unit).expect("some left");
+            let cells = (map.bars_at(eroded.end) - map.bars_at(eroded.start)) / unit;
+            assert!(
+                (cells - cells.round()).abs() < 1e-6,
+                "unit {unit} left {cells} cells, which will not loop"
+            );
+            assert!(map.bars_at(eroded.start) >= 4.6 - 1e-9, "it may not keep what was overwritten");
+        }
+    }
+
+    #[test]
+    fn a_selection_the_head_has_passed_entirely_is_gone() {
+        let map = flat();
+        let bars = |n: f64| map.frame_at_bars(n);
+        let selection = Selection { start: bars(4.0), end: bars(8.0) };
+        assert!(erode(selection, &map, bars(25.0), 16.0, 1.0).is_none(), "swept past all of it");
+        // And the boundary case: the head exactly at the far end.
+        assert!(erode(selection, &map, bars(24.0), 16.0, 1.0).is_none());
     }
 
     #[test]
