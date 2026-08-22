@@ -212,6 +212,33 @@ timestamp**, because stamping ticks in frames of our own capture clock cancels a
 system rate difference instead of accumulating it. It is simply guarding against 0.08 ms over a
 16-bar window rather than the 4 ms first claimed.
 
+## Injecting a clip into the host track: why not
+
+Investigated 22 Aug 2026. Three separate walls, and the outermost is not the one that stops it.
+
+**A VST3 or AU cannot reach the Live API.** There is no such surface. The Live Object Model is
+reachable only from a Max for Live device, or from a MIDI Remote Script — Python, unofficial, and
+explicitly unsupported by Ableton. A plugin can be bridged to a Remote Script over a socket, which
+is what AbletonOSC, `live_rpyc` and similar do, so this wall is passable at the cost of asking
+people to install an unsupported script.
+
+**Passing it does not help, because the Live API cannot make an audio clip from a file.**
+`ClipSlot.create_clip(length)` creates a *MIDI* clip, and only on a MIDI track. There is no
+`create_audio_clip` and no method taking a path. The capability is missing from the model itself,
+so no amount of access reaches it.
+
+**What people do instead is drive the browser**, selecting an item and loading it into the
+highlighted clip slot — the mechanism Push uses. It is indirect, it only ever targets the
+highlighted slot rather than a chosen one, and the drum-rack variant loses warping. That is a lot
+of fragile machinery for something the mouse already does.
+
+**Because dragging onto a clip slot already works.** Live accepts an audio file dropped straight
+onto a Session-view slot, and the drag out of the plugin editor is a real file drag. Dropping on a
+slot instead of the arrangement is the same gesture and needs nothing built.
+
+So: not worth building. Revisit only if Ableton adds a path-taking clip API, at which point the
+socket bridge becomes worth its cost.
+
 ## Environment note
 
 This machine is `arm64` (Apple M3 Max) but every installed Rust toolchain is
