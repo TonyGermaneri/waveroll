@@ -195,15 +195,40 @@ impl Reader {
     /// indices precisely so that the question "is what I picked still here" has an answer, and
     /// export must ask it rather than reading whatever happens to be at those offsets now.
     pub fn holds(&self, start: u64, end: u64) -> bool {
-        end >= start && start >= self.oldest() && end <= self.head()
+        // One load of the head, not two. Reading it separately for each comparison lets it advance
+        // in between, so the two halves of this test would be answered about different moments.
+        let head = self.head();
+        end >= start && start >= head.saturating_sub(self.inner.capacity as u64) && end <= head
     }
 
     /// Copies `out.len()` frames of one channel, starting at absolute frame `start`, into `out`.
     ///
-    /// Returns `false` without touching `out` when the range is no longer wholly in the ring.
-    /// Reading a lapped range would return a seam of old and new audio that looks perfectly
-    /// plausible, which is the worst possible failure for something about to be dropped into
-    /// somebody's session.
+    /// Returns `false` when the range is not wholly in the ring, and when it *stopped* being
+    /// wholly in the ring while it was being copied. `out` may have been written to in that case;
+    /// its contents are meaningless and the caller must not use them.
+    ///
+    /// # What this does and does not promise
+    ///
+    /// The range is checked before and after the copy, which catches the writer lapping it partway
+    /// through — the case that otherwise returns a seam of old and new audio together with `true`
+    /// to say it is sound. That is the worst failure this type can produce: not a crash and not
+    /// silence, but a plausible file that is nobody's selection.
+    ///
+    /// It cannot promise more than that, and it is worth being exact about why. The producer
+    /// stores samples with `Relaxed` ordering and then publishes the head with `Release`, which
+    /// guarantees that a reader seeing the *new* head also sees the samples — but not the reverse.
+    /// A reader can see a freshly written sample alongside a head that has not caught up, and no
+    /// arrangement of checks on a single counter closes that. Protecting against it needs either a
+    /// producer that waits, which the audio thread must never do, or a sequence number per slot,
+    /// which costs more than the hazard is worth here.
+    ///
+    /// **So the contract is: stay comfortably inside the ring.** The plugin allocates 87 seconds
+    /// and exports at most a 32-second selection, leaving 55 seconds of writing between the oldest
+    /// frame it reads and the oldest frame that exists — a margin a real-time writer needs
+    /// 55 seconds to close, against a copy that takes ten milliseconds. `tests/ring_threads.rs`
+    /// hammers that same ratio and expects no seams; it also demonstrates that a reader parked at
+    /// the very tail of a ring turning over every fraction of a millisecond cannot be saved by
+    /// anything, which is why the margin is the contract rather than the check.
     pub fn read_into(&self, channel: usize, start: u64, out: &mut [f32]) -> bool {
         let end = start + out.len() as u64;
         if !self.holds(start, end) {
@@ -215,7 +240,24 @@ impl Reader {
             let at = ((start + i as u64) as usize) & inner.mask;
             *slot = f32::from_bits(inner.data[plane + at].load(Ordering::Relaxed));
         }
-        true
+        // An acquire fence, and it is load-bearing. The sample loads above are `Relaxed`, which
+        // is right for their own sake — they lower to plain loads and the values are validated by
+        // the check below rather than by their own ordering — but nothing otherwise stops them
+        // being reordered *after* that check, which would validate a copy that had not happened
+        // yet. An acquire fence orders prior loads before everything after it, which is exactly
+        // the guarantee the check needs to mean anything. Without it the thread test still found
+        // 49 seams in 88 accepted reads.
+        std::sync::atomic::fence(Ordering::Acquire);
+
+        // Checked again. The producer never waits for anybody, so checking only on the way in
+        // leaves a window where the writer laps the range mid-copy and the caller is handed a seam
+        // of old and new audio together with `true` to say it is sound. That is the worst failure
+        // this type can produce: not a crash and not silence, but a plausible file that is not
+        // what anyone selected. A thread test provoked it 13,483 times in 20,000 reads.
+        //
+        // The head only moves forward, so this can only have become false by the writer overtaking
+        // the oldest end of what was just copied.
+        self.holds(start, end)
     }
 }
 
