@@ -24,6 +24,19 @@ use waveroll_gpu::overlay::{Overlay, OverlayPass};
 use waveroll_gpu::render::{OverlayStyle, Style};
 use waveroll_gpu::wgpu;
 
+/// Everything one paint needs, gathered rather than passed one argument at a time.
+#[derive(Clone, Copy)]
+pub struct Frame<'a> {
+    pub reader: &'a waveroll_core::ring::Reader,
+    pub map: &'a TempoMap,
+    pub viewport: &'a Viewport,
+    pub unit_bars: f64,
+    pub selection: Option<(f64, f64)>,
+    pub markers: &'a [f64],
+    /// Held: leave the mirror unsynced so the picture is exactly what it was.
+    pub held: bool,
+}
+
 pub struct View {
     gpu: Gpu,
     surface: wgpu::Surface<'static>,
@@ -111,25 +124,13 @@ impl View {
         );
     }
 
-    pub fn width(&self) -> u32 {
-        self.size.0
-    }
-
     /// Points rather than pixels — what the grid's auto unit reasons in.
     pub fn logical_width(&self) -> f64 {
         f64::from(self.size.0) / self.scale
     }
 
-    pub fn draw(
-        &mut self,
-        reader: &waveroll_core::ring::Reader,
-        map: &TempoMap,
-        viewport: &Viewport,
-        unit_bars: f64,
-        selection: Option<(f64, f64)>,
-        markers: &[f64],
-        held: bool,
-    ) {
+    pub fn draw(&mut self, frame: &Frame<'_>) {
+        let Frame { reader, map, viewport, unit_bars, selection, markers, held } = *frame;
         if !held {
             self.mirror.sync(&self.gpu, reader);
         }

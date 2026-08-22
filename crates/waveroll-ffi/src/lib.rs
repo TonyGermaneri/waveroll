@@ -452,7 +452,15 @@ pub extern "C" fn wr_view_draw(core: *mut c_void, view: *mut c_void) {
     let markers: Vec<f64> =
         core.markers.iter().map(|m| vp.fraction_at(map.bars_at(*m))).collect();
 
-    view.draw(&core.reader, map, &vp, unit, selection, &markers, core.held_at.is_some());
+    view.draw(&view::Frame {
+        reader: &core.reader,
+        map,
+        viewport: &vp,
+        unit_bars: unit,
+        selection,
+        markers: &markers,
+        held: core.held_at.is_some(),
+    });
 }
 
 /// What the GPU reports itself as, for the editor to show.
