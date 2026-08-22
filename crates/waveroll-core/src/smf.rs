@@ -250,19 +250,19 @@ mod tests {
 
     /// A reader written from the specification rather than from the writer, so a shared
     /// misunderstanding cannot pass both.
-    struct Reader<'a> {
+    pub(super) struct Reader<'a> {
         bytes: &'a [u8],
         at: usize,
     }
 
     #[derive(Debug, PartialEq)]
-    struct Read {
-        tick: u32,
-        bytes: Vec<u8>,
+    pub(super) struct Read {
+        pub tick: u32,
+        pub bytes: Vec<u8>,
     }
 
     impl<'a> Reader<'a> {
-        fn new(bytes: &'a [u8]) -> (u16, Reader<'a>) {
+        pub(super) fn new(bytes: &'a [u8]) -> (u16, Reader<'a>) {
             assert_eq!(&bytes[0..4], b"MThd");
             assert_eq!(u32::from_be_bytes(bytes[4..8].try_into().unwrap()), 6);
             assert_eq!(u16::from_be_bytes(bytes[8..10].try_into().unwrap()), 0, "format 0");
@@ -286,7 +286,7 @@ mod tests {
             }
         }
 
-        fn all(&mut self) -> Vec<Read> {
+        pub(super) fn all(&mut self) -> Vec<Read> {
             let mut out = Vec::new();
             let mut tick = 0;
             while self.at < self.bytes.len() {
@@ -508,5 +508,166 @@ mod tests {
         let events = export(&map, &Clip::default(), sel, &SmfOptions::default());
         assert_eq!(events.last().unwrap().bytes, vec![0xFF, 0x2F, 0x00]);
         assert_eq!(events.last().unwrap().tick, 16 * 960, "the clip keeps its length");
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// From the capture ring
+// ---------------------------------------------------------------------------------------
+
+use crate::midi::MidiRing;
+
+/// A clip's events, owned, so a [`Clip`] can borrow them.
+pub struct Staged {
+    pub notes: Vec<Note>,
+    pub controls: Vec<ControlChange>,
+    pub bends: Vec<PitchBend>,
+}
+
+impl Staged {
+    pub fn clip(&self) -> Clip<'_> {
+        Clip { notes: &self.notes, controls: &self.controls, bends: &self.bends }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.notes.is_empty() && self.controls.is_empty() && self.bends.is_empty()
+    }
+}
+
+/// Reads a selection out of the capture ring, including the state it began under.
+///
+/// The controller and bend snapshots are stamped one frame *before* the selection so they sort
+/// ahead of everything inside it. Emitting them at the same frame as the first note would leave
+/// the ordering to the sort's stability rather than to intent, and a filter cutoff arriving after
+/// the attack it was meant to shape is the whole failure this snapshot exists to prevent.
+pub fn stage(ring: &MidiRing, selection: Selection, let_ring: bool) -> Staged {
+    let before = selection.start.saturating_sub(1);
+    let mut controls: Vec<ControlChange> = ring
+        .controls_before(selection.start)
+        .into_iter()
+        .map(|c| ControlChange {
+            frame: before,
+            channel: c.channel,
+            controller: c.controller,
+            value: c.value,
+        })
+        .collect();
+    let mut bends: Vec<PitchBend> = ring
+        .bends_before(selection.start)
+        .into_iter()
+        .map(|(channel, value)| PitchBend { frame: before, channel, value })
+        .collect();
+
+    // Everything that happened inside comes after the snapshot, in the order it was played.
+    for event in ring.iter() {
+        if event.frame < selection.start || event.frame >= selection.end {
+            continue;
+        }
+        match event.kind() {
+            0xB0 => controls.push(ControlChange {
+                frame: event.frame,
+                channel: event.channel(),
+                controller: event.data1,
+                value: event.data2,
+            }),
+            0xE0 => bends.push(PitchBend {
+                frame: event.frame,
+                channel: event.channel(),
+                value: u16::from(event.data1) | (u16::from(event.data2) << 7),
+            }),
+            _ => {}
+        }
+    }
+
+    let notes = ring
+        .notes_in(selection.start, selection.end, let_ring)
+        .into_iter()
+        .map(|n| Note {
+            start: n.start,
+            end: n.end,
+            channel: n.channel,
+            key: n.key,
+            on_velocity: n.on_velocity,
+            off_velocity: n.off_velocity,
+        })
+        .collect();
+
+    Staged { notes, controls, bends }
+}
+
+#[cfg(test)]
+mod staged_tests {
+    use super::*;
+    use crate::midi::MidiRing;
+    use crate::tempo::Meter;
+
+    const SR: u32 = 48_000;
+
+    #[test]
+    fn a_captured_performance_exports_with_the_state_it_was_played_under() {
+        let map = TempoMap::new(SR, 120.0, Meter::FOUR_FOUR);
+        let bar = |n: f64| map.frame_at_bars(n);
+        let mut ring = MidiRing::new(1024);
+
+        // Before the selection: a cutoff sweep that settles, and the pedal going down.
+        ring.push(bar(0.5), 0xB0, 74, 120);
+        ring.push(bar(1.0), 0xB0, 74, 33);
+        ring.push(bar(1.5), 0xB0, 64, 127);
+        ring.push(bar(2.0), 0xE0, 0x10, 0x4E);
+        // Inside: two notes and a further sweep.
+        ring.push(bar(4.25), 0x90, 60, 100);
+        ring.push(bar(4.5), 0xB0, 74, 90);
+        ring.push(bar(4.75), 0x80, 60, 0);
+        ring.push(bar(5.0), 0x90, 67, 90);
+        ring.push(bar(9.0), 0x80, 67, 0);   // released after the selection ends
+
+        let selection = Selection { start: bar(4.0), end: bar(8.0) };
+        let staged = stage(&ring, selection, false);
+
+        assert_eq!(staged.notes.len(), 2);
+        let ringing = staged.notes.iter().find(|n| n.key == 67).expect("the held note");
+        assert_eq!(ringing.end, Some(selection.end), "cut at the boundary, not left open");
+
+        // The state it began under is present and stamped before the selection starts.
+        let cutoff = staged
+            .controls
+            .iter()
+            .find(|c| c.controller == 74 && c.frame < selection.start)
+            .expect("the cutoff in force");
+        assert_eq!(cutoff.value, 33, "the settled value, not the first or the loudest");
+        assert!(
+            staged.controls.iter().any(|c| c.controller == 64 && c.value == 127),
+            "the pedal was down and the clip must say so"
+        );
+        assert_eq!(staged.bends.len(), 1);
+
+        // And it survives being written and read back.
+        let bytes = write(selection, &map, &staged.clip(), &SmfOptions::default());
+        assert_eq!(&bytes[0..4], b"MThd");
+        let (_, mut reader) = tests::Reader::new(&bytes);
+        let events = reader.all();
+        let at_zero: Vec<_> = events.iter().filter(|e| e.tick == 0).collect();
+        assert!(
+            at_zero.iter().any(|e| e.bytes == vec![0xB0, 74, 33]),
+            "the snapshot must survive into the file: {at_zero:?}"
+        );
+        let first_note = events.iter().position(|e| e.bytes[0] & 0xF0 == 0x90).expect("a note");
+        let last_snapshot =
+            events.iter().rposition(|e| e.tick == 0 && e.bytes[0] == 0xB0).expect("a snapshot");
+        assert!(last_snapshot < first_note, "state has to arrive before the attack it shapes");
+    }
+
+    #[test]
+    fn an_empty_lane_stages_to_nothing_rather_than_a_broken_clip() {
+        let map = TempoMap::new(SR, 120.0, Meter::FOUR_FOUR);
+        let ring = MidiRing::new(64);
+        let selection = Selection { start: 0, end: map.frame_at_bars(4.0) };
+        let staged = stage(&ring, selection, false);
+        assert!(staged.is_empty());
+        // It still writes a valid, correctly-timed file, which is what a host expects to receive.
+        let bytes = write(selection, &map, &staged.clip(), &SmfOptions::default());
+        let (ppq, mut reader) = tests::Reader::new(&bytes);
+        assert_eq!(ppq, DEFAULT_PPQ);
+        assert_eq!(reader.all().last().expect("end of track").tick, 16 * 960);
     }
 }

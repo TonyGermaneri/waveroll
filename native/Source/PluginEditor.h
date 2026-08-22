@@ -61,6 +61,7 @@ public:
 private:
     void timerCallback() override;
     juce::File materialise();
+    juce::File materialiseMidi();
     static juce::String formatUnit (double bars);
 
     WaverollProcessor& plugin;

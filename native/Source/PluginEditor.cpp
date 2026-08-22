@@ -168,6 +168,30 @@ juce::File WaverollEditor::materialise()
 }
 
 
+/**
+ * The same selection as a Standard MIDI File, or nothing when the lane is empty over it.
+ *
+ * Nothing is the right answer rather than an empty clip: a host handed a MIDI file with no notes
+ * creates a track for it, and a silent track nobody asked for is worse than one fewer file.
+ */
+juce::File WaverollEditor::materialiseMidi()
+{
+    auto* core = plugin.core();
+    if (core == nullptr)
+        return {};
+    const auto length = wr_stage_midi (core, /* let_ring */ false);
+    if (length == 0)
+        return {};
+    const auto* bytes = wr_staged_midi_bytes (core);
+    if (bytes == nullptr)
+        return {};
+
+    // Named after the audio it came from, so the pair is obvious in a folder and in a set.
+    auto file = staged.getSiblingFile (staged.getFileNameWithoutExtension() + ".mid");
+    file.replaceWithData (bytes, length);
+    return file;
+}
+
 // ---------------------------------------------------------------------------------------
 // The canvas
 // ---------------------------------------------------------------------------------------
@@ -299,6 +323,11 @@ void WaverollEditor::Canvas::mouseDrag (const juce::MouseEvent& event)
     // message loop, or behind an async write -- and the drag never starts, with no error anywhere.
     juce::StringArray files;
     files.add (editor.staged.getFullPathName());
+    // If anything was played over this selection, the MIDI goes with it. A host turns two dropped
+    // files into two tracks, which is exactly right: the take, and what played it.
+    if (auto notes = editor.materialiseMidi(); notes.existsAsFile())
+        files.add (notes.getFullPathName());
+
     juce::DragAndDropContainer::performExternalDragDropOfFiles (
         files, false, this, [this] { dragging = false; });
 }

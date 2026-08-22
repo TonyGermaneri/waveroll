@@ -18,6 +18,8 @@ use std::ffi::c_void;
 
 use waveroll_core::clock::{CaptureClock, Transport};
 use waveroll_core::grid::{self, Selection, Unit};
+use waveroll_core::midi::MidiRing;
+use waveroll_core::smf::{self, SmfOptions};
 use waveroll_core::ring::{self, Producer, Reader};
 use waveroll_core::tempo::Meter;
 use waveroll_core::view::{View, Viewport};
@@ -72,6 +74,13 @@ pub struct WrCore {
     width: u32,
     planes: Vec<Vec<f32>>,
     staged: Vec<u8>,
+    /// The MIDI lane. Separate from the audio buffer so a selection can be dragged as both, which
+    /// a host turns into two tracks -- the take and what played it.
+    midi: MidiRing,
+    staged_midi: Vec<u8>,
+    /// Where the block being captured began, so a MIDI event's offset within it can be stamped on
+    /// the same axis as the audio.
+    block_start: u64,
 }
 
 /// Turns a raw pointer into a reference, or does nothing.
@@ -122,6 +131,10 @@ pub extern "C" fn wr_create(
         // thread that block -- which is the right trade against refusing the audio.
         planes: vec![Vec::with_capacity(max_block.clamp(64, 1 << 16) as usize); channels],
         staged: Vec::new(),
+        // 16k events is minutes of dense playing, and costs 128 kB.
+        midi: MidiRing::new(1 << 14),
+        staged_midi: Vec::new(),
+        block_start: 0,
     });
     Box::into_raw(core) as *mut c_void
 }
@@ -160,6 +173,7 @@ pub extern "C" fn wr_capture(
         meter: Meter::new(transport.numerator.max(1), transport.denominator.max(1)),
         offline: transport.offline,
     };
+    core.block_start = core.clock.captured();
     let taken = core.clock.advance(&transport, frames as usize);
     if taken == 0 {
         return 0;
@@ -178,6 +192,54 @@ pub extern "C" fn wr_capture(
     let views: Vec<&[f32]> = core.planes.iter().map(|p| p.as_slice()).collect();
     core.producer.write(&views, taken);
     taken as u32
+}
+
+/// Captures one MIDI event, stamped by its offset within the block just given to [`wr_capture`].
+///
+/// Call after `wr_capture` for the same block. Real-time safe, and silently does nothing when the
+/// block was refused -- MIDI follows the transport exactly as audio does, or a clip would contain
+/// notes from a passage whose audio was never recorded.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_capture_midi(
+    core: *mut c_void,
+    offset_in_block: u32,
+    status: u8,
+    data1: u8,
+    data2: u8,
+) {
+    let core = core_ref!(core, ());
+    let head = core.clock.captured();
+    if head <= core.block_start {
+        return;
+    }
+    // Clamped inside the block: a host may report an offset past the end, and a frame beyond the
+    // write head would make every reader treat the event as not captured yet.
+    let frame = (core.block_start + u64::from(offset_in_block)).min(head - 1);
+    core.midi.push(frame, status, data1, data2);
+}
+
+/// Renders the selection's MIDI as a Standard MIDI File; returns its length, or 0 when there is
+/// nothing on the lane.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_stage_midi(core: *mut c_void, let_ring: bool) -> usize {
+    let core = core_ref!(core, 0);
+    core.staged_midi.clear();
+    let Some(selection) = core.selection else { return 0 };
+    let staged = smf::stage(&core.midi, selection, let_ring);
+    if staged.is_empty() {
+        return 0;
+    }
+    let options = SmfOptions { let_ring, ..SmfOptions::default() };
+    core.staged_midi =
+        smf::write(selection, core.clock.map(), &staged.clip(), &options);
+    core.staged_midi.len()
+}
+
+/// Valid until the next [`wr_stage_midi`].
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_staged_midi_bytes(core: *mut c_void) -> *const u8 {
+    let core = core_ref!(core, std::ptr::null());
+    core.staged_midi.as_ptr()
 }
 
 /// Tells the core how wide the editor is, which is what the auto grid unit is chosen against.

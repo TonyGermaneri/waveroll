@@ -56,6 +56,14 @@ void     wr_destroy (void* core);
 uint32_t wr_capture (void* core, const float* const* channels, uint32_t frames,
                      const WrTransport* transport);
 
+/** Call after wr_capture for the same block. Does nothing when that block was refused. */
+void     wr_capture_midi (void* core, uint32_t offset_in_block,
+                          uint8_t status, uint8_t data1, uint8_t data2);
+
+/** Renders the selection's MIDI as a Standard MIDI File; 0 when the lane is empty there. */
+size_t         wr_stage_midi (void* core, bool let_ring);
+const uint8_t* wr_staged_midi_bytes (void* core);
+
 void     wr_set_width (void* core, uint32_t width);
 void     wr_set_window_bars (void* core, double bars);
 void     wr_set_unit (void* core, double bars);   /**< 0 means auto */

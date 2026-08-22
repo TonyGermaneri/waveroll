@@ -39,7 +39,7 @@ bool WaverollProcessor::isBusesLayoutSupported (const BusesLayout& layouts) cons
         && ! layouts.getMainInputChannelSet().isDisabled();
 }
 
-void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -78,7 +78,24 @@ void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         // the core. During a bounce the host calls this far faster than realtime with the
         // transport reporting "playing" the whole way, so without that guard exporting a track
         // quietly replaces the take with the export.
-        wr_capture (rustCore, pointers, (uint32_t) buffer.getNumSamples(), &transport);
+        const auto taken = wr_capture (rustCore, pointers, (uint32_t) buffer.getNumSamples(),
+                                       &transport);
+
+        // After the audio, so the events land on the same axis. The core refuses them when the
+        // block was refused, which keeps a clip from containing notes whose audio was never
+        // recorded.
+        if (taken > 0)
+        {
+            for (const auto metadata : midi)
+            {
+                const auto message = metadata.getMessage();
+                const auto* raw = message.getRawData();
+                if (message.getRawDataSize() >= 2)
+                    wr_capture_midi (rustCore, (uint32_t) metadata.samplePosition,
+                                     raw[0], raw[1],
+                                     message.getRawDataSize() >= 3 ? raw[2] : (juce::uint8) 0);
+            }
+        }
     }
 
     // The buffer is deliberately untouched. In equals out, sample for sample.

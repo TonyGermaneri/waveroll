@@ -8,6 +8,7 @@
 
 pub mod clock;
 pub mod grid;
+pub mod midi;
 pub mod ring;
 pub mod smf;
 pub mod tempo;
