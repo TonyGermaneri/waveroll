@@ -2,6 +2,37 @@
 
 namespace waveroll { const char* buildStamp(); }
 
+WaverollEditor::Tiny::Tiny (const juce::String& g, const juce::String& tip,
+                            std::function<void()> action)
+    : juce::Button (tip), glyph (g)
+{
+    setTooltip (tip);
+    onClick = std::move (action);
+}
+
+void WaverollEditor::Tiny::paintButton (juce::Graphics& g, bool highlighted, bool down)
+{
+    const auto bounds = getLocalBounds().toFloat().reduced (0.5f);
+    g.setColour (juce::Colour (down ? 0xff2a2313u : highlighted ? 0xff1d232du : 0xff141922u));
+    g.fillRoundedRectangle (bounds, 3.0f);
+    g.setColour (juce::Colour (highlighted || down ? 0xfff0b342u : 0xff4a5262u));
+    g.drawRoundedRectangle (bounds, 3.0f, 1.0f);
+    g.setColour (juce::Colour (highlighted || down ? 0xfff0b342u : 0xff97a1b2u));
+    g.setFont (juce::FontOptions (11.0f));
+    g.drawText (glyph, getLocalBounds(), juce::Justification::centred);
+}
+
+/// Lays the readout and its steppers out right to left, and returns the width it took.
+int WaverollEditor::Stepper::layout (juce::Rectangle<int>& footer, int valueWidth)
+{
+    const int box = footer.getHeight() - 4;
+    up->setBounds (footer.removeFromRight (box).reduced (0, 2));
+    down->setBounds (footer.removeFromRight (box).reduced (0, 2));
+    footer.removeFromRight (3);
+    value.setBounds (footer.removeFromRight (valueWidth));
+    return box * 2 + 3 + valueWidth;
+}
+
 WaverollEditor::WaverollEditor (WaverollProcessor& p)
     : AudioProcessorEditor (&p), plugin (p)
 {
@@ -18,6 +49,31 @@ WaverollEditor::WaverollEditor (WaverollProcessor& p)
                   "scroll to zoom  .  \\ fit  .  m mark  .  n from mark  .  h hold  .  d downbeat",
                   juce::dontSendNotification);
     addAndMakeVisible (hint);
+
+    auto readout = [this] (juce::Label& label, const juce::String& text, juce::Justification just) {
+        label.setText (text, juce::dontSendNotification);
+        label.setJustificationType (just);
+        label.setFont (juce::FontOptions (11.0f));
+        label.setColour (juce::Label::textColourId, juce::Colour (0xff97a1b2));
+        addAndMakeVisible (label);
+    };
+    readout (gridLabel, "grid", juce::Justification::centredRight);
+    readout (zoomLabel, "zoom", juce::Justification::centredRight);
+    readout (grid.value, "1", juce::Justification::centred);
+    readout (zoom.value, "1.0x", juce::Justification::centred);
+
+    auto tiny = [this] (juce::String glyph, juce::String tip, std::function<void()> action) {
+        auto button = std::make_unique<Tiny> (glyph, tip, std::move (action));
+        addAndMakeVisible (*button);
+        return button;
+    };
+    // The steppers move the same way the keys do, so the two never disagree about the ladder.
+    grid.down = tiny ("-", "Finer grid (,)", [this] { step (Setting::Grid, -1); });
+    grid.up   = tiny ("+", "Coarser grid (.)", [this] { step (Setting::Grid, +1); });
+    zoom.down = tiny ("-", "Zoom out (scroll)", [this] { step (Setting::Zoom, -1); });
+    zoom.up   = tiny ("+", "Zoom in (scroll)", [this] { step (Setting::Zoom, +1); });
+    fit       = tiny (juce::String::fromUTF8 ("\xe2\x86\x94"), "Fit to width (\\)",
+                      [this] { step (Setting::Fit, 0); });
 
     // Without this the host swallows every keystroke. EDITOR_WANTS_KEYBOARD_FOCUS makes a host
     // willing to hand them over at all; this makes the editor willing to take them.
@@ -52,10 +108,40 @@ void WaverollEditor::paint (juce::Graphics& g)
 void WaverollEditor::resized()
 {
     auto area = getLocalBounds();
-    auto footer = area.removeFromBottom (22);
-    status.setBounds (footer.removeFromLeft (footer.getWidth() * 2 / 3).reduced (10, 0));
-    hint.setBounds (footer.reduced (10, 0));
+    auto footer = area.removeFromBottom (24);
+    footer.removeFromRight (8);
+
+    // Right to left: fit, then zoom and its steppers, then grid and its steppers.
+    const int box = footer.getHeight() - 4;
+    fit->setBounds (footer.removeFromRight (box + 4).reduced (2));
+    footer.removeFromRight (10);
+    zoom.layout (footer, 40);
+    zoomLabel.setBounds (footer.removeFromRight (34));
+    footer.removeFromRight (10);
+    grid.layout (footer, 34);
+    gridLabel.setBounds (footer.removeFromRight (30));
+
+    status.setBounds (footer.removeFromLeft (juce::jmax (0, footer.getWidth())).reduced (10, 0));
+    hint.setBounds (getLocalBounds().removeFromBottom (40).removeFromTop (16).reduced (10, 0));
     canvas.setBounds (area);
+}
+
+/// One place the steppers and the keys both go through, so they cannot drift apart.
+void WaverollEditor::step (Setting setting, int direction)
+{
+    auto* core = plugin.core();
+    if (core == nullptr)
+        return;
+    switch (setting)
+    {
+        case Setting::Grid:   wr_cycle_unit (core, direction); break;
+        // Two to a step, matching a wheel notch, and anchored at the centre because a button has
+        // no pointer position to anchor on.
+        case Setting::Zoom:   wr_zoom (core, direction > 0 ? 2.0 : 0.5, 0.5); break;
+        case Setting::Window: wr_cycle_window (core, direction); break;
+        case Setting::Fit:    wr_home (core); break;
+    }
+    grabKeyboardFocus();
 }
 
 void WaverollEditor::timerCallback()
@@ -84,6 +170,14 @@ void WaverollEditor::timerCallback()
         else if (s.selection_state == 2) text << " (overwritten)";
     }
     status.setText (text, juce::dontSendNotification);
+    grid.value.setText (formatUnit (s.unit_bars) + (s.unit_bars <= 0.0 ? "" : ""),
+                        juce::dontSendNotification);
+    grid.value.setColour (juce::Label::textColourId,
+                          juce::Colour (0xfff0b342).withAlpha (0.9f));
+    zoom.value.setText (juce::String (s.zoom, s.zoom < 10.0 ? 1 : 0) + "x",
+                        juce::dontSendNotification);
+    zoom.value.setColour (juce::Label::textColourId,
+                          juce::Colour (s.zoom > 1.001 ? 0xfff0b342u : 0xff6b7484u));
 }
 
 bool WaverollEditor::keyPressed (const juce::KeyPress& key)

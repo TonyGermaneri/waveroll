@@ -60,15 +60,47 @@ public:
     };
 
 private:
+    enum class Setting { Grid, Zoom, Window, Fit };
+    void step (Setting, int direction);
     void timerCallback() override;
     juce::File materialise();
     juce::File materialiseMidi();
     static juce::String formatUnit (double bars);
 
+    /**
+     * A footer control: a glyph in a box, sized to sit beside a readout.
+     *
+     * Its own class rather than a TextButton because the default look is a rounded slab designed
+     * to be pressed, and these need to be the smallest thing that can still be hit -- a plugin
+     * footer is not where a person wants furniture.
+     */
+    class Tiny : public juce::Button
+    {
+    public:
+        Tiny (const juce::String& glyph, const juce::String& tip, std::function<void()> action);
+        void paintButton (juce::Graphics&, bool highlighted, bool down) override;
+    private:
+        juce::String glyph;
+    };
+
+    /** A readout with a pair of steppers beside it. */
+    struct Stepper
+    {
+        juce::Label value;
+        std::unique_ptr<Tiny> down;
+        std::unique_ptr<Tiny> up;
+        int layout (juce::Rectangle<int>& footer, int valueWidth);
+    };
+
     WaverollProcessor& plugin;
     Canvas canvas { *this };
     juce::Label status;
     juce::Label hint;
+    juce::Label gridLabel;
+    juce::Label zoomLabel;
+    Stepper grid;
+    Stepper zoom;
+    std::unique_ptr<Tiny> fit;
     juce::File staged;
     bool held = false;
 

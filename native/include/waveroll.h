@@ -40,6 +40,7 @@ typedef struct
     double   head;            /**< write head as a fraction of the editor width */
     double   window_bars;
     double   unit_bars;
+    double   zoom;            /**< 1.0 is fit to width */
     bool     has_selection;
     double   selection_bars;
     double   selection_from;  /**< canvas fractions; outside 0..1 when off screen */

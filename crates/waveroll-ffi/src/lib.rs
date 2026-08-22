@@ -65,6 +65,8 @@ pub struct WrStatus {
     pub head: f64,
     pub window_bars: f64,
     pub unit_bars: f64,
+    /// 1.0 is fit to width.
+    pub zoom: f64,
     pub has_selection: bool,
     pub selection_bars: f64,
     /// Selection edges as canvas fractions; outside 0..1 when off screen.
@@ -559,6 +561,7 @@ pub extern "C" fn wr_status(core: *mut c_void, out: *mut WrStatus) {
             head: vp.head_fraction(),
             window_bars: core.view.window_bars,
             unit_bars: unit_bars(core, &vp),
+            zoom: core.view.zoom,
             markers: core.markers.len() as u32,
             ..Default::default()
         };
