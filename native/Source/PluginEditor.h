@@ -1,12 +1,13 @@
 #pragma once
 #include "PluginProcessor.h"
 
+void*  waverollCreateNativeView (int width, int height);
+void   waverollReleaseNativeView (void* handle);
+double waverollViewScale (void* handle);
+
 /**
- * The editor, and for now the one measurement that decides the project's shape: whether a drag out
- * of a *plugin* editor is accepted by a host's own arrangement.
- *
- * Dragging out of a plugin is strictly harder than out of an app, because the editor lives inside
- * the host's view hierarchy, so proving it here proves it everywhere.
+ * The editor: a GPU surface with the rolling buffer on it, and the mouse rules that turn it into a
+ * selection interface.
  */
 class WaverollEditor : public juce::AudioProcessorEditor,
                        private juce::Timer
@@ -19,36 +20,56 @@ public:
     void resized() override;
     bool keyPressed (const juce::KeyPress&) override;
 
-    /** The region you drag from. Kept as its own component so the drag begins from a hit test
-        rather than from anywhere in the window. */
-    class DragSource : public juce::Component
+    /**
+     * The picture, and the surface the mouse acts on.
+     *
+     * An NSViewComponent because the renderer needs a real native view to attach a Metal layer to;
+     * the view is hit-transparent, so this component still receives every mouse event.
+     */
+    class Canvas : public juce::NSViewComponent
     {
     public:
-        explicit DragSource (WaverollEditor& owner) : editor (owner) {}
-        void paint (juce::Graphics&) override;
+        explicit Canvas (WaverollEditor& owner) : editor (owner) {}
+        ~Canvas() override;
+
+        void open();
+        void close();
+        void drawFrame();
+        void resized() override;
+
+        void mouseDown (const juce::MouseEvent&) override;
         void mouseDrag (const juce::MouseEvent&) override;
-        void mouseEnter (const juce::MouseEvent&) override;
-        void mouseExit (const juce::MouseEvent&) override;
+        void mouseUp (const juce::MouseEvent&) override;
+        void mouseMove (const juce::MouseEvent&) override;
+
+        juce::String describe() const;
+        bool ready() const noexcept { return gpuView != nullptr; }
 
     private:
+        double fractionOf (const juce::MouseEvent&) const;
+        bool overSelection (const juce::MouseEvent&) const;
+
         WaverollEditor& editor;
-        bool hot = false;
+        void* native = nullptr;
+        void* gpuView = nullptr;
+        double dragFrom = 0.0;
         bool dragging = false;
+        bool grabbing = false;
+        bool moved = false;
     };
 
 private:
     void timerCallback() override;
-    /** Writes the file that will be dragged, returning its path. */
     juce::File materialise();
     static juce::String formatUnit (double bars);
 
     WaverollProcessor& plugin;
-    DragSource source { *this };
+    Canvas canvas { *this };
     juce::Label status;
     juce::Label hint;
     juce::File staged;
     bool held = false;
 
-    friend class DragSource;
+    friend class Canvas;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollEditor)
 };

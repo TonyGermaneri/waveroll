@@ -12,6 +12,8 @@
 //! and does nothing, because a crash inside somebody's DAW is the worst possible failure mode and
 //! "the plugin did nothing" is a far better one than "the host died".
 
+mod view;
+
 use std::ffi::c_void;
 
 use waveroll_core::clock::{CaptureClock, Transport};
@@ -389,4 +391,85 @@ pub extern "C" fn wr_status(core: *mut c_void, out: *mut WrStatus) {
         };
     }
     *out = status;
+}
+
+// ---------------------------------------------------------------------------------------
+// The picture
+// ---------------------------------------------------------------------------------------
+
+/// Opens a GPU surface on a native view.
+///
+/// # Safety
+/// `native_view` must be a valid `NSView*` that outlives the returned handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_view_open(
+    core: *mut c_void,
+    native_view: *mut c_void,
+    width: u32,
+    height: u32,
+    scale: f64,
+) -> *mut c_void {
+    let core = core_ref!(core, std::ptr::null_mut());
+    let capacity = core.reader.capacity();
+    let channels = core.reader.channels();
+    match unsafe { view::View::open(native_view, width, height, scale, capacity, channels) } {
+        Ok(view) => Box::into_raw(Box::new(view)) as *mut c_void,
+        // A plugin whose picture failed to open should still capture and still drag. Returning
+        // null lets the editor say so and carry on rather than taking the host down with it.
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_view_resize(view: *mut c_void, width: u32, height: u32, scale: f64) {
+    let Some(view) = (unsafe { (view as *mut view::View).as_mut() }) else { return };
+    view.resize(width, height, scale);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_view_close(view: *mut c_void) {
+    if !view.is_null() {
+        drop(unsafe { Box::from_raw(view as *mut view::View) });
+    }
+}
+
+/// Paints one frame.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_view_draw(core: *mut c_void, view: *mut c_void) {
+    let core = core_ref!(core, ());
+    let Some(view) = (unsafe { (view as *mut view::View).as_mut() }) else { return };
+
+    // The auto grid unit is chosen against apparent spacing, so the core reasons in points while
+    // the surface is in pixels.
+    core.width = view.logical_width().round().max(1.0) as u32;
+    let vp = viewport(core);
+    let unit = unit_bars(core, &vp);
+    let map = core.clock.map();
+
+    let selection = core.selection.map(|s| {
+        (vp.fraction_at(map.bars_at(s.start)), vp.fraction_at(map.bars_at(s.end)))
+    });
+    let markers: Vec<f64> =
+        core.markers.iter().map(|m| vp.fraction_at(map.bars_at(*m))).collect();
+
+    view.draw(&core.reader, map, &vp, unit, selection, &markers, core.held_at.is_some());
+}
+
+/// What the GPU reports itself as, for the editor to show.
+///
+/// # Safety
+/// `out` must point to at least `cap` bytes.
+#[unsafe(no_mangle)]
+pub extern "C" fn wr_view_describe(view: *mut c_void, out: *mut u8, cap: usize) -> usize {
+    let Some(view) = (unsafe { (view as *mut view::View).as_mut() }) else { return 0 };
+    let text = view.describe();
+    let bytes = text.as_bytes();
+    let n = bytes.len().min(cap.saturating_sub(1));
+    if !out.is_null() && cap > 0 {
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, n);
+            *out.add(n) = 0;
+        }
+    }
+    n
 }

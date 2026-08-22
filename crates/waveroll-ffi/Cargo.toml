@@ -10,3 +10,5 @@ crate-type = ["staticlib"]
 
 [dependencies]
 waveroll-core = { path = "../waveroll-core" }
+waveroll-gpu = { path = "../waveroll-gpu" }
+raw-window-handle = "0.6"

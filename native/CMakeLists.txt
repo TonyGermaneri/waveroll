@@ -105,6 +105,7 @@ juce_add_plugin(Waveroll
 target_sources(Waveroll PRIVATE
   Source/PluginProcessor.cpp
   Source/PluginEditor.cpp
+  Source/NativeView.mm
   ${WAVEROLL_STAMP})
 
 target_include_directories(Waveroll PRIVATE include)

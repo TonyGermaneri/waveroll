@@ -893,7 +893,9 @@ version = "0.1.0"
 name = "waveroll-ffi"
 version = "0.1.0"
 dependencies = [
+ "raw-window-handle",
  "waveroll-core",
+ "waveroll-gpu",
 ]
 
 [[package]]

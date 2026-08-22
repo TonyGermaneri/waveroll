@@ -5,76 +5,85 @@ namespace waveroll { const char* buildStamp(); }
 WaverollEditor::WaverollEditor (WaverollProcessor& p)
     : AudioProcessorEditor (&p), plugin (p)
 {
-    addAndMakeVisible (source);
-    status.setJustificationType (juce::Justification::centred);
+    addAndMakeVisible (canvas);
+    status.setJustificationType (juce::Justification::centredLeft);
     status.setColour (juce::Label::textColourId, juce::Colour (0xff97a1b2));
+    status.setFont (juce::FontOptions (12.0f));
     addAndMakeVisible (status);
-    hint.setJustificationType (juce::Justification::centred);
+
+    hint.setJustificationType (juce::Justification::centredRight);
     hint.setColour (juce::Label::textColourId, juce::Colour (0xff4a5262));
     hint.setFont (juce::FontOptions (11.0f));
-    hint.setText ("1-0 select the last N x 10%   .  m mark  .  n from the mark  .  "
-                  "h hold  .  d downbeat  .  esc clear",
+    hint.setText ("drag inside the selection to take it  .  1-0 last N x 10%  .  m mark  .  "
+                  "n from mark  .  h hold  .  d downbeat",
                   juce::dontSendNotification);
     addAndMakeVisible (hint);
-    // Without this the host swallows every keystroke and none of the above works. The plugin is
-    // declared EDITOR_WANTS_KEYBOARD_FOCUS so a host will hand them over at all.
+
+    // Without this the host swallows every keystroke. EDITOR_WANTS_KEYBOARD_FOCUS makes a host
+    // willing to hand them over at all; this makes the editor willing to take them.
     setWantsKeyboardFocus (true);
-    setSize (620, 260);
-    startTimerHz (20);
+    setResizable (true, true);
+    setResizeLimits (520, 220, 4000, 1600);
+    setSize (900, 340);
+    startTimerHz (60);
+    canvas.open();
 }
 
 WaverollEditor::~WaverollEditor()
 {
-    // Deliberately not deleted. A host references dropped audio by path until the set is
-    // collected, so removing it here would break somebody's project days later with no trace.
+    stopTimer();
+    canvas.close();
+    // The staged file is deliberately left behind: a host references dropped audio by path until
+    // the set is collected, so deleting it here would break somebody's project days later.
 }
 
 void WaverollEditor::paint (juce::Graphics& g)
 {
     g.fillAll (juce::Colour (0xff0b0e13));
-    g.setColour (juce::Colour (0xff6b7484));
-    g.setFont (juce::FontOptions (12.0f));
-    auto top = getLocalBounds().removeFromTop (34);
-    g.drawText ("WAVEROLL", top, juce::Justification::centred);
-    // Which build this is, so "am I running the one I just built" is answerable by looking.
-    g.setColour (juce::Colour (0xff3a434f));
-    g.setFont (juce::FontOptions (10.0f));
-    g.drawText (waveroll::buildStamp(), top.reduced (8, 0), juce::Justification::centredRight);
+    if (! canvas.ready())
+    {
+        g.setColour (juce::Colour (0xffff8d7d));
+        g.setFont (juce::FontOptions (13.0f));
+        g.drawText ("The GPU surface could not be opened. Capture and drag still work.",
+                    canvas.getBounds(), juce::Justification::centred);
+    }
 }
 
 void WaverollEditor::resized()
 {
-    auto area = getLocalBounds().reduced (24);
-    area.removeFromTop (20);
-    hint.setBounds (area.removeFromBottom (20));
-    status.setBounds (area.removeFromBottom (44));
-    source.setBounds (area.reduced (0, 10));
-    if (plugin.core() != nullptr)
-        wr_set_width (plugin.core(), (uint32_t) juce::jmax (1, getWidth()));
+    auto area = getLocalBounds();
+    auto footer = area.removeFromBottom (22);
+    status.setBounds (footer.removeFromLeft (footer.getWidth() * 2 / 3).reduced (10, 0));
+    hint.setBounds (footer.reduced (10, 0));
+    canvas.setBounds (area);
 }
 
 void WaverollEditor::timerCallback()
 {
     if (plugin.core() == nullptr)
         return;
+
+    canvas.drawFrame();
+
     WrStatus s {};
     wr_status (plugin.core(), &s);
-
     const auto rate = plugin.currentSampleRate();
-    juce::String text = s.held ? "frozen" : s.playing ? "capturing" : "stopped";
+    juce::String text = s.held ? "FROZEN" : s.playing ? "capturing" : "stopped";
     text << "   " << juce::String (s.bpm, 2) << " BPM"
-         << "   " << juce::String (s.captured / juce::jmax (1.0, rate), 1) << " s"
          << "   bar " << juce::String (s.head * s.window_bars + 1.0, 2)
          << " of " << juce::String (s.window_bars, 0)
-         << "   grid " << formatUnit (s.unit_bars);
+         << "   lap " << juce::String ((int) s.lap)
+         << "   grid " << formatUnit (s.unit_bars)
+         << "   " << juce::String (s.captured / juce::jmax (1.0, rate), 1) << " s";
+    if (s.markers > 0)
+        text << "   marks " << juce::String ((int) s.markers);
     if (s.has_selection)
     {
-        text << "      selection " << juce::String (s.selection_bars, 2) << " bars";
+        text << "      sel " << juce::String (s.selection_bars, 2) << " bars";
         if (s.selection_state == 1) text << " (not captured yet)";
-        if (s.selection_state == 2) text << " (overwritten)";
+        else if (s.selection_state == 2) text << " (overwritten)";
     }
     status.setText (text, juce::dontSendNotification);
-    source.setEnabled (s.selection_state == 3);
 }
 
 bool WaverollEditor::keyPressed (const juce::KeyPress& key)
@@ -158,46 +167,151 @@ juce::File WaverollEditor::materialise()
     return file;
 }
 
-void WaverollEditor::DragSource::paint (juce::Graphics& g)
+
+// ---------------------------------------------------------------------------------------
+// The canvas
+// ---------------------------------------------------------------------------------------
+
+WaverollEditor::Canvas::~Canvas() { close(); }
+
+void WaverollEditor::Canvas::open()
 {
-    const auto bounds = getLocalBounds().toFloat().reduced (1.0f);
-    g.setColour (juce::Colour (hot ? 0xff2a2313 : 0xff141922));
-    g.fillRoundedRectangle (bounds, 5.0f);
-    g.setColour (juce::Colour (0xfff0b342));
-    g.drawRoundedRectangle (bounds, 5.0f, hot ? 2.0f : 1.0f);
-    g.setFont (juce::FontOptions (14.0f));
-    const auto* label = ! isEnabled() ? "select something first"
-                      : dragging      ? "dragging..."
-                                      : "Drag this into the arrangement";
-    g.setColour (juce::Colour (isEnabled() ? 0xfff0b342 : 0xff4a5262));
-    g.drawText (label, getLocalBounds(), juce::Justification::centred);
+    if (native != nullptr)
+        return;
+    native = waverollCreateNativeView (juce::jmax (1, getWidth()), juce::jmax (1, getHeight()));
+    setView (native);
+    if (auto* core = editor.plugin.core())
+    {
+        const auto scale = waverollViewScale (native);
+        gpuView = wr_view_open (core, native,
+                                (uint32_t) juce::jmax (1, juce::roundToInt (getWidth() * scale)),
+                                (uint32_t) juce::jmax (1, juce::roundToInt (getHeight() * scale)),
+                                scale);
+    }
 }
 
-void WaverollEditor::DragSource::mouseEnter (const juce::MouseEvent&) { hot = true; repaint(); }
-void WaverollEditor::DragSource::mouseExit  (const juce::MouseEvent&) { hot = false; dragging = false; repaint(); }
-
-void WaverollEditor::DragSource::mouseDrag (const juce::MouseEvent& event)
+void WaverollEditor::Canvas::close()
 {
-    if (dragging || event.getDistanceFromDragStart() < 6)
+    // Order matters: the surface holds the view, so it goes first.
+    wr_view_close (gpuView);
+    gpuView = nullptr;
+    setView (nullptr);
+    waverollReleaseNativeView (native);
+    native = nullptr;
+}
+
+void WaverollEditor::Canvas::resized()
+{
+    NSViewComponent::resized();
+    if (gpuView == nullptr)
+        return;
+    const auto scale = waverollViewScale (native);
+    wr_view_resize (gpuView,
+                    (uint32_t) juce::jmax (1, juce::roundToInt (getWidth() * scale)),
+                    (uint32_t) juce::jmax (1, juce::roundToInt (getHeight() * scale)),
+                    scale);
+}
+
+void WaverollEditor::Canvas::drawFrame()
+{
+    if (gpuView != nullptr)
+        wr_view_draw (editor.plugin.core(), gpuView);
+}
+
+juce::String WaverollEditor::Canvas::describe() const
+{
+    char buffer[128] {};
+    wr_view_describe (gpuView, (uint8_t*) buffer, sizeof (buffer));
+    return juce::String (buffer);
+}
+
+double WaverollEditor::Canvas::fractionOf (const juce::MouseEvent& event) const
+{
+    return juce::jlimit (0.0, 1.0, (double) event.x / juce::jmax (1.0, (double) getWidth()));
+}
+
+/**
+ * Whether the pointer is over the selection.
+ *
+ * The rule that separates grabbing from selecting, and the same one every arrangement view uses: a
+ * drag that starts inside a selection carries it, a drag anywhere else starts a new one. Alt forces
+ * a new selection, for when the thing you want is underneath the thing you already have.
+ */
+bool WaverollEditor::Canvas::overSelection (const juce::MouseEvent& event) const
+{
+    auto* core = editor.plugin.core();
+    if (core == nullptr || event.mods.isAltDown())
+        return false;
+    WrStatus s {};
+    wr_status (core, &s);
+    if (! s.has_selection || s.selection_state != 3)
+        return false;
+    const auto at = fractionOf (event);
+    return at >= juce::jmin (s.selection_from, s.selection_to)
+        && at <= juce::jmax (s.selection_from, s.selection_to);
+}
+
+void WaverollEditor::Canvas::mouseMove (const juce::MouseEvent& event)
+{
+    setMouseCursor (overSelection (event) ? juce::MouseCursor::DraggingHandCursor
+                                          : juce::MouseCursor::CrosshairCursor);
+}
+
+void WaverollEditor::Canvas::mouseDown (const juce::MouseEvent& event)
+{
+    dragFrom = fractionOf (event);
+    grabbing = overSelection (event);
+    dragging = false;
+    moved = false;
+    editor.grabKeyboardFocus();
+}
+
+void WaverollEditor::Canvas::mouseDrag (const juce::MouseEvent& event)
+{
+    auto* core = editor.plugin.core();
+    if (core == nullptr)
+        return;
+
+    // A pointer that has not travelled is a click, not a drag. Without this every click becomes a
+    // one-pixel drag, and at high zoom those select different things.
+    if (! moved && event.getDistanceFromDragStart() < 3)
+        return;
+    moved = true;
+
+    if (! grabbing)
+    {
+        wr_drag (core, dragFrom, fractionOf (event));
+        return;
+    }
+    if (dragging)
         return;
     dragging = true;
-    repaint();
 
     editor.staged = editor.materialise();
     if (! editor.staged.existsAsFile())
     {
         dragging = false;
-        repaint();
         return;
     }
 
     // Started synchronously from inside the mouse handler, and this is the fiddly part: on macOS a
-    // drag session has to begin while the originating event is still current. Queuing it -- onto
-    // the message loop, or behind an async file write -- produces a drag that never starts, with
-    // no error anywhere.
+    // drag session must begin while the originating event is still current. Queue it -- onto the
+    // message loop, or behind an async write -- and the drag never starts, with no error anywhere.
     juce::StringArray files;
     files.add (editor.staged.getFullPathName());
     juce::DragAndDropContainer::performExternalDragDropOfFiles (
-        files, /* canMoveFiles */ false, this,
-        [this] { dragging = false; repaint(); });
+        files, false, this, [this] { dragging = false; });
+}
+
+void WaverollEditor::Canvas::mouseUp (const juce::MouseEvent& event)
+{
+    if (auto* core = editor.plugin.core(); core != nullptr && ! moved && ! grabbing)
+        wr_click (core, fractionOf (event));
+    grabbing = false;
+    moved = false;
+}
+
+juce::AudioProcessorEditor* createWaverollEditor (WaverollProcessor& p)
+{
+    return new WaverollEditor (p);
 }

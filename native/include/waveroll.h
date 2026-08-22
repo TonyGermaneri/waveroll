@@ -77,6 +77,15 @@ double         wr_selection_bars (void* core);
 
 void     wr_status (void* core, WrStatus* out);
 
+/* The picture. `native_view` is an NSView* that must outlive the returned handle; a null return
+   means the GPU could not be opened, and the plugin should carry on capturing without a display
+   rather than take the host down with it. */
+void*    wr_view_open (void* core, void* native_view, uint32_t width, uint32_t height, double scale);
+void     wr_view_resize (void* view, uint32_t width, uint32_t height, double scale);
+void     wr_view_draw (void* core, void* view);
+void     wr_view_close (void* view);
+size_t   wr_view_describe (void* view, uint8_t* out, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif
