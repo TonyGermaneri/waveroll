@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/waveroll-core"]
+members = ["crates/waveroll-core", "crates/waveroll-gpu"]
 
 [workspace.package]
 version = "0.1.0"

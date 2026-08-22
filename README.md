@@ -26,6 +26,11 @@ Full build plan, including the reasoning behind everything below:
 
 ```
 crates/
+  waveroll-gpu/     Rust + wgpu. One WGSL, four backends.
+    shaders/          vendored from waveshape, unchanged, read-only
+    device.rs         headless adapter, and a block_on too small to be a dependency
+    fft.rs            twiddles, the Stockham stage schedule, the ping-pong
+    reference.rs      an O(N^2) f64 DFT: the oracle, sharing no code with the shaders
   waveroll-core/    Rust. No I/O, no UI, no platform.
     ring.rs           wait-free SPSC ring, planar f32, overwriting
     tempo.rs          TempoMap: capture frames -> quarters -> bars
@@ -56,10 +61,52 @@ internally consistent, pass every one of its own assertions, and still be a file
 | --- | --- |
 | `afinfo` | CoreAudio — the code Logic itself opens files with — agrees with the header, at all three depths. |
 | `ffprobe` | An entirely independent implementation reports the same codec, rate, channels and an exact duration. |
+| `naga` | wgpu's own shader compiler validates the vendored WGSL and translates it to Metal and SPIR-V. See below. |
 | `fluidsynth` | An independent sequencer renders the MIDI clip. Its voice-decay tail makes an absolute duration brittle, so the test is *differential*: halving the tempo must add exactly eight seconds to a four-bar clip, which cancels the tail and can only come out right if PPQ, the tempo meta and the delta times are all correct. |
 
 Each skips loudly when its tool is absent, so none of them is ever the reason a fresh checkout
 goes red.
+
+### Spike 3, first half — one shader set, four backends
+
+waveshape's shaders already targeted WebGPU, and WGSL is wgpu's native shading language, so they
+vendor unchanged. `naga` 29.0.3 — the compiler wgpu 26 uses — validates all three and translates
+them to both native backends, emitting all four kernels:
+
+```
+prepare  -> metal 2618 B   spv 3676 B
+fft      -> metal 3372 B   spv 4868 B     radix2_ and radix4_ both emitted
+unpack   -> metal 1535 B   spv 2552 B
+```
+
+That is the portability claim at the compiler level. The second half is `tests/selftest.rs`, which
+runs the chain and compares it against `reference.rs` — an O(N²) `f64` transform written straight
+from the definition, sharing no code with the shaders. Measured on Apple M3 Max, Metal:
+
+| N | bins | max error | rms error | |
+| --- | --- | --- | --- | --- |
+| 512 | 257 | 7.181e-6 % | 1.086e-6 % | |
+| 1024 | 513 | 4.441e-6 % | 7.098e-7 % | radix-2 stage first |
+| 2048 | 1025 | 1.185e-5 % | 7.069e-7 % | |
+| 4096 | 2049 | 8.228e-6 % | 4.438e-7 % | radix-2 stage first |
+| 8192 | 4097 | 9.573e-6 % | 3.215e-7 % | |
+
+waveshape publishes 3.2e-6 % max and 3.3e-7 % rms for the same chain under WebGPU. The rms figures
+agree to the digit; the max differs because it is a different test signal over a different set of
+sizes, and max-of-N is the noisier statistic of the two. **Same shaders, same arithmetic, different
+backend.**
+
+Both parities of `log2(N/2)` are covered deliberately: an odd one runs a radix-2 stage ahead of the
+radix-4 chain, and that stage exists at no other size. Two structural checks sit alongside — an
+impulse must be flat in every bin, and a tone exactly on a bin centre under a rectangular window
+must leave every other bin at zero *and* land negative-imaginary, since a conjugated twiddle table
+is invisible to any magnitude comparison and fatal to reassignment.
+
+**A trap, recorded because it cost real time.** `naga <file> --stdin-file-path <name>` does not
+validate `<file>`: with `--stdin-file-path` set, naga reads the shader from **stdin** and treats
+the positional argument as an **output** file. Run that against a source tree and it silently
+truncates every shader to an empty module, which then validates perfectly. The shaders are
+`chmod 444` so it cannot happen twice. Validate with `naga <file>` and nothing else.
 
 ## Spikes — these need a human
 
@@ -135,6 +182,17 @@ None of this changes the architecture. `ClockPll::feed` still takes a **frame in
 timestamp**, because stamping ticks in frames of our own capture clock cancels any device-versus-
 system rate difference instead of accumulating it. It is simply guarding against 0.08 ms over a
 16-bar window rather than the 4 ms first claimed.
+
+## Environment note
+
+This machine is `arm64` (Apple M3 Max) but every installed Rust toolchain is
+`x86_64-apple-darwin`, so cargo and rustc run under Rosetta 2 — the first wgpu build took 7m15s.
+`rustup toolchain install stable-aarch64-apple-darwin` would build natively, and an `aarch64` slice
+is needed for the universal binaries in phase 9 regardless. The default is left alone here because
+the pinned nightlies suggest the x86 toolchain is deliberate.
+
+wgpu still reaches the real GPU through Rosetta — the self-test reports `Apple M3 Max (Metal)` —
+so nothing above is measuring an emulated device.
 
 ## Prior art in this repo's family
 

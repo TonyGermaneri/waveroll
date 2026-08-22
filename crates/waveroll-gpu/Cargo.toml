@@ -1,0 +1,10 @@
+[package]
+name = "waveroll-gpu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The analysis and render chain, on wgpu. One WGSL, four backends."
+
+[dependencies]
+wgpu = "26"
+waveroll-core = { path = "../waveroll-core" }
