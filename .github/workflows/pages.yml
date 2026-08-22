@@ -1,0 +1,54 @@
+# Publishes the browser build to GitHub Pages on every push to main.
+#
+# The web build is a real target of this project rather than a demo, but it is the lesser one: a
+# browser can only offer a file *promise* on a drag, and no DAW accepts one, so the page writes
+# into a watched folder instead of dragging. Worth having hosted; not worth mistaking for the
+# plug-in.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and let an in-flight one finish rather than cancelling it partway.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build the site
+        run: tools/package-web.sh ${{ github.sha }}
+
+      # enablement turns Pages on for the repository if it is off, so this works on a fresh repo
+      # without anybody visiting the settings page first.
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/web
+      - id: deployment
+        uses: actions/deploy-pages@v4

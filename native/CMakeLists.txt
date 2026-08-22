@@ -88,6 +88,11 @@ if(GIT_FOUND)
     OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 endif()
 
+# On for the dev loop, where the point of a build is to try it in a host. The packaging script
+# turns it off: building a release should not reach into the plug-in folders and swap out whatever
+# the machine is currently running.
+option(WAVEROLL_INSTALL_AFTER_BUILD "Copy the built plug-ins into the user's plug-in folders" ON)
+
 juce_add_plugin(Waveroll
   VERSION 0.1.${WAVEROLL_BUILD}
   COMPANY_NAME "Waveroll"
@@ -100,7 +105,7 @@ juce_add_plugin(Waveroll
   NEEDS_MIDI_OUTPUT FALSE
   IS_MIDI_EFFECT FALSE
   EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-  COPY_PLUGIN_AFTER_BUILD TRUE)
+  COPY_PLUGIN_AFTER_BUILD ${WAVEROLL_INSTALL_AFTER_BUILD})
 
 target_sources(Waveroll PRIVATE
   Source/PluginProcessor.cpp

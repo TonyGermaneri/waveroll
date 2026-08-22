@@ -102,6 +102,12 @@ native/
 web/                a page that drives the wasm build; no behaviour of its own
 tools/
   clock-trace.html  captures a MIDI clock stream for tests/replay.rs
+  package-*.sh      the release build and packaging, runnable before a tag exists
+  release-notes.sh  the body of a GitHub release, readable before it is published
+.github/workflows/
+  ci.yml            tests, lint, and every target, on every push
+  release.yml       a v* tag builds each target and publishes the zips
+  pages.yml         main deploys the browser build to GitHub Pages
 ```
 
 The shape is one rule: **everything that decides anything is in Rust.** What a click selects, where
@@ -135,8 +141,56 @@ test runs on one thread, which is the condition under which its interesting fail
 And `crates/waveroll-gpu/tests/render.rs` asserts on pixels, because everything between the ring
 and the screen is arithmetic that produces something plausible when it is wrong.
 
-CI runs all of it on macOS, plus the plugin build, `auval`, and a check that all three binaries are
-universal.
+CI runs on every push and every pull request, in three jobs. **Rust** runs the tests and clippy on
+macOS, then compiles the core for `wasm32` — the portability claim, checked rather than asserted.
+**Web** builds the site with `wasm-pack`, which is where a `wasm-bindgen` version mismatch shows up
+and nowhere else. **Plug-in** builds through the same packaging script a release uses, then
+validates the Audio Unit against the artefact it just packaged, unzipped — so what `auval` passes is
+the file that would be published, not another build of the same commit.
+
+Every green run leaves installable zips behind under the run's **Artifacts**, kept for two weeks.
+That is the build to ask somebody to try when a bug report needs a specific commit.
+
+## Releasing it
+
+```
+git tag -a v0.1.0 -m "what changed"
+git push origin v0.1.0
+```
+
+That is the whole procedure. The tag builds every target from the tagged commit and publishes a
+release with one zip per target and a `SHA256SUMS.txt`:
+
+| | |
+| --- | --- |
+| `Waveroll-v0.1.0-macOS-AU.zip` | `Waveroll.component`, universal, `auval`-validated |
+| `Waveroll-v0.1.0-macOS-VST3.zip` | `Waveroll.vst3`, universal |
+| `Waveroll-v0.1.0-macOS-Standalone.zip` | `Waveroll.app`, universal |
+| `Waveroll-v0.1.0-web.zip` | the built site, and `serve.py` to serve it |
+
+The build and packaging live in `tools/package-macos.sh` and `tools/package-web.sh`, not inline in
+the workflow, so they can be **run before a tag is pushed** — a release process that exists only
+inside a YAML file is first exercised at the worst possible moment. Both take a version and leave
+their output in `dist/`. `tools/release-notes.sh` writes the release body, and can be read before it
+is published.
+
+The release build differs from the dev build in two ways worth knowing. It is configured
+`Release` — the dev tree has no build type at all, which means `-O0` C++ around an `-O3` Rust core,
+fine for iterating and not fine to hand somebody. And it passes
+`-DWAVEROLL_INSTALL_AFTER_BUILD=OFF`, because packaging a release should not reach into the plug-in
+folders and swap out whatever the machine is currently running.
+
+**Nothing is signed with a Developer ID or notarised.** The bundles are ad-hoc signed, which is all
+an unsigned project can do and all arm64 needs in order to load at all, but it does not clear the
+quarantine flag macOS puts on a downloaded zip — and a host given a quarantined plug-in declines it
+without saying why. The release notes carry the `xattr -dr com.apple.quarantine` line. Real signing
+needs a paid Developer ID certificate and an app-specific password in repository secrets; until
+those exist, saying so is better than shipping a plug-in that appears not to work.
+
+Pushing to `main` also deploys the browser build to GitHub Pages. It is hosted without the COOP and
+COEP headers Pages cannot set, so `SharedArrayBuffer` is unavailable there and `web/src/ring.js`
+falls back to a plain `ArrayBuffer` — correct, one copy slower. `web/serve.py` sets those headers,
+so a local run gets the shared path.
 
 ## Decisions of record
 

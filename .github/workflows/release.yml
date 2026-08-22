@@ -1,0 +1,104 @@
+# Cutting a release.
+#
+#   git tag -a v0.1.0 -m "..." && git push origin v0.1.0
+#
+# Builds every target from the tagged commit, validates the Audio Unit against the artefact that
+# will actually be published, and attaches one zip per target. Nothing here is signed with a
+# Developer ID -- see the note the release notes carry about quarantine.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Ninja
+        run: brew list ninja >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ninja
+
+      - name: Build and package
+        run: tools/package-macos.sh ${{ github.ref_name }}
+
+      # The binary that gets published is the binary that gets validated. Building a second time
+      # to test would be testing a different build.
+      - name: Validate the Audio Unit
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          ditto -x -k dist/macos/Waveroll-${{ github.ref_name }}-macOS-AU.zip \
+            ~/Library/Audio/Plug-Ins/Components
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aumf Wvr1 Wvrl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/macos/*.zip
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build the site
+        run: tools/package-web.sh ${{ github.ref_name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web
+          path: dist/*.zip
+
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    needs: [macos, web]
+    permissions:
+      contents: write
+    steps:
+      # The tags are needed to work out what the previous release was, which is what the changelog
+      # in the notes is computed against.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+      - name: Collect the artefacts
+        run: |
+          mkdir -p dist
+          find incoming -name '*.zip' -exec mv {} dist/ \;
+          cd dist && sha256sum ./*.zip | sed 's| \./| |' | tee SHA256SUMS.txt
+
+      - name: Write the notes
+        run: tools/release-notes.sh "${{ github.ref_name }}" > dist/NOTES.md
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "Waveroll ${{ github.ref_name }}" \
+            --notes-file dist/NOTES.md \
+            dist/*.zip dist/SHA256SUMS.txt

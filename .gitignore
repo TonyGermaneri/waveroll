@@ -5,3 +5,8 @@
 /web/pkg
 # CMake build tree, and JUCE fetched into it
 /native/build
+# Release build tree and packaged artefacts, both produced by tools/package-*.sh
+/native/build-release
+# JUCE, fetched once and shared between the dev and release build trees
+/native/.deps
+/dist

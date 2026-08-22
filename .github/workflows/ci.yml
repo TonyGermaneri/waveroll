@@ -1,14 +1,21 @@
 # What has to be true before anything is believed.
 #
-# macOS because the plugin is the product and AU exists nowhere else. The GPU tests skip rather
-# than fail when a runner has no usable adapter — a hosted runner often does not — which is why
-# they were written to announce a skip instead of passing silently.
+# The plug-in job builds through the same script a release uses, so the packaging path is exercised
+# on every push rather than for the first time under a tag, and the zips this leaves behind are
+# real installable builds of that commit.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# A push that supersedes an in-flight run cancels it. Not for the release workflow, where a
+# half-finished publish is worse than a slow one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,6 +34,9 @@ jobs:
 
       # Not --workspace: waveroll-wasm only compiles for wasm32, so it is excluded through
       # default-members, and --workspace overrides that and fails the build.
+      #
+      # The GPU tests skip rather than fail when a runner has no usable adapter, which is why they
+      # were written to announce a skip instead of passing silently.
       - name: Test
         run: cargo test --verbose
       # Denied on the command line rather than through RUSTFLAGS, which would apply to every
@@ -36,47 +46,72 @@ jobs:
 
       # The portability claim, checked rather than asserted: the same core has to compile for the
       # browser as well as for native.
-      - name: Build for wasm
+      - name: Lint and build for wasm
         run: |
           cargo clippy -p waveroll-wasm --target wasm32-unknown-unknown -- -D warnings
           cargo build -p waveroll-core --target wasm32-unknown-unknown
 
-  plugin:
-    name: Plugin
-    runs-on: macos-15
+  web:
+    name: Web
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install the toolchain
         run: |
           rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # The version is pinned against the wasm-bindgen the crate pins. A mismatch between the two
+      # is the single most common way this build fails, and it fails at generation time with a
+      # message about schema versions rather than anywhere useful.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.13.1
+
+      - name: Build the site
+        run: tools/package-web.sh ${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ github.sha }}
+          path: dist/web
+          retention-days: 14
+
+  plugin:
+    name: Plug-in
+    runs-on: macos-15
+    steps:
+      # Unshallow: the build stamp and the plug-in version both come from the commit count, and a
+      # depth-1 checkout would report every build as the first one.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
           rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
-
       - name: Install Ninja
-        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+        run: brew list ninja >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ninja
 
-      # The generator is named explicitly. Configuring without -G falls back to Makefiles, and if a
-      # build.ninja is already lying around the next build fails with "make: Makefile: No such
-      # file" and names nothing useful.
-      - name: Configure
-        run: cmake -B native/build -S native -G Ninja
-      - name: Build AU, VST3 and standalone
-        run: cmake --build native/build
+      # Builds Release, universal, ad-hoc signs, and checks the slices. See tools/package-macos.sh.
+      - name: Build and package
+        run: tools/package-macos.sh ci-${{ github.sha }}
 
-      # Logic will not load a plugin that fails this, and its complaints are about things --
+      # Logic will not load a plug-in that fails this, and its complaints are about things --
       # render-in-place, reset behaviour, channel configurations -- that are invisible until
-      # somebody reports the plugin simply is not in the list.
+      # somebody reports the plug-in simply is not in the list. Run against the unzipped artefact
+      # so what is validated is what is published.
       - name: Validate the Audio Unit
         run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          ditto -x -k dist/macos/Waveroll-ci-${{ github.sha }}-macOS-AU.zip \
+            ~/Library/Audio/Plug-Ins/Components
           killall -9 AudioComponentRegistrar || true
           sleep 2
           auval -v aumf Wvr1 Wvrl
 
-      - name: Check the binaries are universal
-        run: |
-          for slice in AU/Waveroll.component VST3/Waveroll.vst3 Standalone/Waveroll.app; do
-            binary="native/build/Waveroll_artefacts/$slice/Contents/MacOS/Waveroll"
-            archs=$(lipo -archs "$binary")
-            echo "$slice: $archs"
-            [ "$archs" = "x86_64 arm64" ] || { echo "not universal"; exit 1; }
-          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ github.sha }}
+          path: dist/macos/*.zip
+          retention-days: 14

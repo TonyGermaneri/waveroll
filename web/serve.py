@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Development server with the two headers SharedArrayBuffer needs.
+"""Static server with the two headers SharedArrayBuffer needs.
 
 A plain static server will not do: `SharedArrayBuffer` is only exposed to cross-origin-isolated
-documents, and isolation requires COOP and COEP on every response. On GitHub Pages, where response
-headers cannot be set at all, a service worker supplies them instead — see the README.
+documents, and isolation requires COOP and COEP on every response.
+
+GitHub Pages cannot set either, so the deployed copy is not isolated and `src/ring.js` falls back
+to a plain `ArrayBuffer` — correct, one copy slower. Run this instead to get the shared path.
 """
 
 import http.server
