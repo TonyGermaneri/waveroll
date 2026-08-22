@@ -278,6 +278,11 @@ impl EnvelopePass {
         gpu.queue.write_buffer(&self.columns, 0, &self.packed);
     }
 
+    /// The reduced columns, left on the GPU for the render pass.
+    pub fn output(&self) -> &wgpu::Buffer {
+        &self.output
+    }
+
     pub fn workgroup_size() -> u32 {
         WORKGROUP
     }

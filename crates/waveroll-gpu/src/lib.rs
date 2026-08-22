@@ -12,7 +12,9 @@ pub mod device;
 pub mod envelope;
 pub mod fft;
 pub mod reference;
+pub mod render;
 
 pub use device::Gpu;
 pub use envelope::{Envelope, EnvelopePass, RingMirror};
 pub use fft::Analyzer;
+pub use render::{Style, Target, WaveformPass};
