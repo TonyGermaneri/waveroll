@@ -364,3 +364,30 @@ mod tests {
         assert_eq!(percent_from_head(&map, 1.0, head, 16.0, 99), all);
     }
 }
+
+#[cfg(test)]
+mod phase_tests {
+    use super::*;
+    use crate::tempo::Meter;
+
+    /// The grid must honour a hand-set downbeat, or the correction exists in the map and nowhere
+    /// the user can see it.
+    #[test]
+    fn snapping_follows_a_hand_set_downbeat() {
+        let mut map = TempoMap::new(48_000, 120.0, Meter::FOUR_FOUR);
+        let downbeat = map.frame_at_bars(4.375);
+        map.set_downbeat(downbeat);
+
+        // A click just after the tapped downbeat must select the cell that starts on it.
+        let sel = cell_at(&map, 1.0, downbeat + 1000);
+        assert_eq!(
+            sel.start, downbeat,
+            "the cell should begin on the downbeat the user tapped"
+        );
+        assert!(sel.end > sel.start);
+
+        // And a drag around it snaps to the same lines.
+        let dragged = snap_range(&map, 1.0, downbeat + 1000, downbeat + 200_000);
+        assert_eq!(dragged.start, downbeat);
+    }
+}

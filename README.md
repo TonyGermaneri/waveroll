@@ -87,6 +87,41 @@ from a devtools session.
 Record the results here, with host versions and dates. They will rot, and knowing when they were
 last true is the point.
 
+### Results
+
+**Spike 2 — Ableton Live 12 Suite over IAC, 21 Aug 2026.** 408 ticks, 0 dropped.
+
+| | |
+| --- | --- |
+| Tempo | 119.985 BPM against a nominal 120 |
+| Jitter, σ of interval | 0.048 ms — 2.3 samples at 48 kHz |
+| Worst excursion | 0.14 ms |
+| Song Position Pointer | **never sent** |
+
+Three things follow.
+
+**Live never sends SPP, and that is smaller than it sounds.** It sends `Start` whenever playback
+begins, wherever the playhead was, so capture beat zero is simply wherever the user pressed play.
+Ticks are beats, so the grid is *always* beat-aligned; it is only *bar*-aligned if playback
+happened to begin on a downbeat, which is usually but not always. The correction is therefore never
+more than one bar, and it lives in `TempoMap::bar_phase` — set by `set_downbeat`, which the
+`set downbeat` key and its MIDI binding drive. Not a fallback: with Live it is the only way bar one
+is ever established.
+
+**Jitter over IAC is twenty times better than the estimator was designed for.** σ of 2.3 samples
+through a least-squares fit over 24 ticks is 0.068 samples of slope error — about 0.008 BPM. The
+window stays at 24 anyway, because USB-attached hardware is a different order of magnitude and this
+is the case that has to survive it, not the easy one.
+
+**119.985 against a nominal 120 is 125 ppm, and it is a clock-domain artefact rather than an
+error.** Live generates its clock on the audio thread, driven by the interface's crystal;
+`performance.now()` runs off the system clock; the trace tool times one with the other. That is
+4 ms of error at the far end of a 16-bar window and it grows with the window. It is also exactly
+why `ClockPll::feed` takes a **frame index rather than a timestamp** — stamping ticks in frames of
+our own capture clock, the same device clock Live is generating from, cancels the rate difference
+instead of accumulating it. Worth confirming what the session tempo was actually set to, to rule
+out the dull explanation.
+
 ## Prior art in this repo's family
 
 `../waveshape` — the WebGPU analyser this borrows its shaders, ring design, control panel, keymap

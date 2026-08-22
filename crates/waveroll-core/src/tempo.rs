@@ -54,6 +54,16 @@ struct Entry {
 pub struct TempoMap {
     sample_rate: f64,
     entries: Vec<Entry>,
+    /// Where the bar lines sit, as a fraction of a bar, relative to capture frame zero.
+    ///
+    /// This exists because of what Spike 2 found: **Live never sends Song Position Pointer.** It
+    /// sends `Start` whenever playback begins, wherever the playhead was, so capture beat zero is
+    /// simply wherever the user pressed play. Ticks are beats, so the grid is always beat-aligned;
+    /// but it is only *bar*-aligned if playback happened to begin on a downbeat.
+    ///
+    /// That is a much smaller problem than having no position at all — the correction is never more
+    /// than one bar — and this is where it is stored. See `set_downbeat`.
+    bar_phase: f64,
 }
 
 impl TempoMap {
@@ -63,7 +73,25 @@ impl TempoMap {
         TempoMap {
             sample_rate: sample_rate as f64,
             entries: vec![Entry { frame: 0, bpm, meter, quarters: 0.0, bars: 0.0 }],
+            bar_phase: 0.0,
         }
+    }
+
+    /// Where the bar lines sit, as a fraction of a bar.
+    pub fn bar_phase(&self) -> f64 { self.bar_phase }
+
+    /// Moves the bar lines so `frame` falls on one.
+    ///
+    /// Bar *numbers* keep counting from capture start; only their alignment moves, and never by
+    /// more than a bar. This is what the `set downbeat` key and its MIDI binding drive: the user
+    /// taps on a downbeat and the graticule snaps to where the music actually is.
+    pub fn set_downbeat(&mut self, frame: u64) {
+        self.bar_phase = self.raw_bars_at(frame).rem_euclid(1.0);
+    }
+
+    /// Clears any bar-phase correction. What a host that reports true position gives us for free.
+    pub fn clear_downbeat(&mut self) {
+        self.bar_phase = 0.0;
     }
 
     pub fn sample_rate(&self) -> f64 { self.sample_rate }
@@ -128,8 +156,16 @@ impl TempoMap {
         e.quarters + self.quarters_between(e, frame)
     }
 
-    /// Bars elapsed at `frame`. Fractional — 6.25 is a quarter of the way into bar seven.
+    /// Bars elapsed at `frame`, in the phase the grid is drawn in. Fractional — 6.25 is a quarter
+    /// of the way into bar seven. May be slightly negative near capture start once a downbeat has
+    /// been set later than frame zero.
     pub fn bars_at(&self, frame: u64) -> f64 {
+        self.raw_bars_at(frame) - self.bar_phase
+    }
+
+    /// Bars elapsed, ignoring the downbeat correction. The accumulation everything else is built
+    /// on; the phase is applied only at the boundary, so moving it can never disturb history.
+    fn raw_bars_at(&self, frame: u64) -> f64 {
         let e = self.segment_at_frame(frame);
         e.bars + self.quarters_between(e, frame) / e.meter.quarters_per_bar()
     }
@@ -139,7 +175,7 @@ impl TempoMap {
     /// Rounding rather than truncating matters: snapping computes in bars and comes back here, so
     /// a floor would drift the grid one sample earlier on every conversion.
     pub fn frame_at_bars(&self, bars: f64) -> u64 {
-        let bars = bars.max(0.0);
+        let bars = (bars + self.bar_phase).max(0.0);
         let e = self.segment_at_bar(bars);
         let quarters = (bars - e.bars) * e.meter.quarters_per_bar();
         let frames = quarters * 60.0 * self.sample_rate / e.bpm;
@@ -259,6 +295,58 @@ mod tests {
             m.push(beat * 24_000, 120.0, Meter::FOUR_FOUR);
         }
         assert_eq!(m.len(), 1, "a clock re-reporting the same tempo must not append");
+    }
+
+    #[test]
+    fn a_downbeat_can_be_set_by_hand() {
+        // Playback began three eighths into a bar, which is what happens when Live sends Start from
+        // wherever the playhead was and never tells us where that was.
+        let mut m = TempoMap::new(SR, 120.0, Meter::FOUR_FOUR);
+        let tapped = m.frame_at_bars(4.375); // the user taps on what is really a downbeat
+        m.set_downbeat(tapped);
+
+        let at = m.bars_at(tapped);
+        assert!(
+            (at - at.round()).abs() < 1e-9,
+            "after setting the downbeat, {tapped} should be on a bar line but reads {at}"
+        );
+        assert!((m.bar_phase() - 0.375).abs() < 1e-9);
+        // Never more than a bar of correction, whatever was tapped.
+        assert!((0.0..1.0).contains(&m.bar_phase()));
+    }
+
+    #[test]
+    fn a_downbeat_moves_the_lines_and_not_the_history() {
+        let mut m = TempoMap::new(SR, 120.0, Meter::FOUR_FOUR);
+        let change = m.frame_at_bars(8.0);
+        m.push(change, 174.0, Meter::FOUR_FOUR);
+        let quarters_before: Vec<f64> = (0..20).map(|i| m.quarters_at(i * 100_000)).collect();
+
+        m.set_downbeat(m.frame_at_bars(3.25));
+        let quarters_after: Vec<f64> = (0..20).map(|i| m.quarters_at(i * 100_000)).collect();
+        assert_eq!(quarters_before, quarters_after, "phase must not touch elapsed musical time");
+
+        // And the map still inverts exactly.
+        let mut bars = 0.0;
+        while bars < 20.0 {
+            let frame = m.frame_at_bars(bars);
+            let tolerance = 2.0 / m.frames_per_bar_at(frame);
+            assert!((m.bars_at(frame) - bars).abs() < tolerance, "round trip broke at {bars}");
+            bars += 0.25;
+        }
+    }
+
+    #[test]
+    fn bars_still_never_decrease_with_a_phase_set() {
+        let mut m = TempoMap::new(SR, 100.0, Meter::FOUR_FOUR);
+        m.push(240_000, 60.0, Meter::new(5, 4));
+        m.set_downbeat(123_457);
+        let mut previous = f64::NEG_INFINITY;
+        for frame in (0..1_000_000).step_by(997) {
+            let bars = m.bars_at(frame);
+            assert!(bars >= previous, "bars went backwards at frame {frame}");
+            previous = bars;
+        }
     }
 
     #[test]
