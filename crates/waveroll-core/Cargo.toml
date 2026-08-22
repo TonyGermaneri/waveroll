@@ -1,0 +1,8 @@
+[package]
+name = "waveroll-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ring, clock, tempo map, grid and export writers. No I/O, no UI, no platform."
+
+[dependencies]

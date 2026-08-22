@@ -1,0 +1,208 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Waveroll — MIDI clock trace</title>
+<style>
+  :root { color-scheme: dark light; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; }
+  body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 24px 28px;
+         background: #0e1116; color: #e6e9ef; }
+  h1 { font-size: 15px; letter-spacing: .14em; text-transform: uppercase; color: #7a8496; margin: 0 0 20px; }
+  fieldset { border: 1px solid #28303b; border-radius: 6px; padding: 14px 16px; margin: 0 0 16px; }
+  legend { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: #7a8496; padding: 0 6px; }
+  button, select { font: inherit; background: #1d232d; color: #e6e9ef; border: 1px solid #3a434f;
+                   border-radius: 4px; padding: 6px 12px; }
+  button:hover:not(:disabled) { border-color: #6b7686; }
+  button:disabled { opacity: .4; }
+  button.rec[data-on="1"] { background: #7f1d1d; border-color: #f87171; }
+  table { border-collapse: collapse; width: 100%; }
+  td { padding: 3px 14px 3px 0; vertical-align: top; }
+  td:first-child { color: #7a8496; white-space: nowrap; }
+  .big { font-size: 20px; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  #log { height: 150px; overflow: auto; background: #0a0d12; border: 1px solid #28303b;
+         border-radius: 4px; padding: 8px 10px; font-size: 12px; color: #97a1b2; white-space: pre; }
+  p.note { color: #7a8496; max-width: 78ch; }
+  code { color: #f0b342; }
+</style>
+
+<h1>Waveroll · MIDI clock trace · spike 2</h1>
+
+<p class="note">Serve this over <code>localhost</code>, not <code>file://</code> — Web MIDI needs a secure
+context. From the repo root: <code>python3 -m http.server -d tools 8777</code> then open
+<code>http://localhost:8777/clock-trace.html</code> in Chrome.</p>
+
+<fieldset>
+  <legend>Port</legend>
+  <select id="port"><option>— requesting access —</option></select>
+  <button id="rec" class="rec" data-on="0" disabled>Record</button>
+  <button id="save" disabled>Save trace.txt</button>
+  <span id="state" style="color:#7a8496"></span>
+</fieldset>
+
+<fieldset>
+  <legend>What the stream says</legend>
+  <table>
+    <tr><td>Tempo</td><td class="big" id="bpm">—</td></tr>
+    <tr><td>Jitter (σ of interval)</td><td id="jitter">—</td></tr>
+    <tr><td>Worst excursion</td><td id="worst">—</td></tr>
+    <tr><td>Ticks · dropped</td><td id="counts">—</td></tr>
+    <tr><td>Song Position Pointer</td><td id="spp" class="bad">never seen</td></tr>
+    <tr><td>Transport</td><td id="transport">—</td></tr>
+  </table>
+</fieldset>
+
+<fieldset>
+  <legend>Events</legend>
+  <div id="log"></div>
+</fieldset>
+
+<p class="note">Ten minutes is plenty. While recording, do all four of these in the DAW: <b>play and
+stop</b> a few times; <b>relocate</b> the playhead and press play (that is what shows whether SPP is
+ever sent); run a <b>tempo automation ramp</b>; and <b>loop</b> a few bars. Then save the JSON.</p>
+
+<script>
+const $ = id => document.getElementById(id);
+const NAMES = { 0xF8: 'clock', 0xFA: 'start', 0xFB: 'continue', 0xFC: 'stop', 0xF2: 'song position' };
+
+let access = null, bound = [], recording = false;
+const trace = { started: null, port: null, events: [] };
+const intervals = [];
+let lastTick = null, ticks = 0, dropped = 0, sawSpp = false;
+
+function log(line) {
+  $('log').textContent = (line + '\n' + $('log').textContent).slice(0, 8000);
+}
+
+function stats() {
+  if (intervals.length < 8) return;
+  // Trim the top and bottom 5% before computing sigma: one scheduler hiccup otherwise dominates
+  // the number and hides what the stream normally does, which is the thing being measured.
+  const sorted = [...intervals].sort((a, b) => a - b);
+  const cut = Math.floor(sorted.length * 0.05);
+  const core = sorted.slice(cut, sorted.length - cut);
+  const mean = core.reduce((a, b) => a + b, 0) / core.length;
+  const sigma = Math.sqrt(core.reduce((a, b) => a + (b - mean) ** 2, 0) / core.length);
+  const worst = Math.max(...intervals.map(v => Math.abs(v - mean)));
+
+  $('bpm').textContent = (60000 / (mean * 24)).toFixed(3) + ' BPM';
+  $('jitter').innerHTML = `<span class="${sigma < 0.5 ? 'ok' : sigma < 2 ? 'warn' : 'bad'}">`
+    + sigma.toFixed(3) + ' ms</span>';
+  $('worst').innerHTML = `<span class="${worst < 3 ? 'ok' : worst < 10 ? 'warn' : 'bad'}">`
+    + worst.toFixed(2) + ' ms</span>';
+  $('counts').textContent = `${ticks} · ${dropped}`;
+}
+
+function onMessage(event) {
+  const bytes = Array.from(event.data);
+  const status = bytes[0];
+  if (status < 0xF0) return;                       // channel voice traffic is not our business
+  const at = event.timeStamp;
+
+  if (recording) trace.events.push({ t: at, d: bytes });
+
+  if (status === 0xF8) {
+    ticks++;
+    if (lastTick !== null) {
+      const gap = at - lastTick;
+      // Anything past 1.8x the running mean is a tick that did not arrive, not a slow one.
+      const mean = intervals.length ? intervals.reduce((a, b) => a + b, 0) / intervals.length : gap;
+      if (gap > mean * 1.8 && intervals.length > 8) dropped++;
+      else { intervals.push(gap); if (intervals.length > 480) intervals.shift(); }
+    }
+    lastTick = at;
+    if (ticks % 12 === 0) stats();
+    return;
+  }
+
+  lastTick = null;                                  // a transport message breaks the tick chain
+  if (status === 0xF2) {
+    sawSpp = true;
+    const sixteenths = bytes[1] | (bytes[2] << 7);
+    $('spp').className = 'ok';
+    $('spp').textContent = `yes — last at ${sixteenths} sixteenths (bar ${(sixteenths / 16 + 1).toFixed(2)} in 4/4)`;
+    log(`${at.toFixed(1)}  song position  ${sixteenths}`);
+    return;
+  }
+  if (NAMES[status]) {
+    $('transport').textContent = NAMES[status];
+    log(`${at.toFixed(1)}  ${NAMES[status]}`);
+  }
+}
+
+function bind() {
+  for (const port of bound) port.onmidimessage = null;
+  bound = [];
+  const want = $('port').value;
+  for (const input of access.inputs.values()) {
+    if (want !== '*' && input.id !== want) continue;
+    input.onmidimessage = onMessage;
+    bound.push(input);
+  }
+  $('state').textContent = bound.length ? `listening on ${bound.length}` : 'no port';
+}
+
+function refreshPorts() {
+  const select = $('port');
+  const previous = select.value;
+  select.innerHTML = '<option value="*">All inputs</option>';
+  for (const input of access.inputs.values()) {
+    const option = document.createElement('option');
+    option.value = input.id;
+    option.textContent = input.name || input.id;
+    select.append(option);
+  }
+  if ([...select.options].some(o => o.value === previous)) select.value = previous;
+  bind();
+}
+
+$('port').onchange = bind;
+
+$('rec').onclick = () => {
+  recording = !recording;
+  $('rec').dataset.on = recording ? '1' : '0';
+  $('rec').textContent = recording ? 'Stop' : 'Record';
+  if (recording) {
+    trace.events.length = 0;
+    trace.started = new Date().toISOString();
+    trace.port = $('port').selectedOptions[0]?.textContent ?? '';
+    log('--- recording ---');
+  } else {
+    $('save').disabled = trace.events.length === 0;
+    log(`--- stopped, ${trace.events.length} events ---`);
+  }
+};
+
+// Plain text rather than JSON: the replay test parses it with `split_whitespace` and the crate
+// keeps its empty dependency list. It is also readable, which matters for something being checked
+// in as the record of a spike.
+$('save').onclick = () => {
+  const head = [
+    '# waveroll midi clock trace',
+    `# started ${trace.started}`,
+    `# port ${trace.port}`,
+    `# host ${navigator.userAgent}`,
+    `# ticks ${ticks} dropped ${dropped} spp ${sawSpp}`,
+    '# columns: milliseconds, then raw bytes in hex',
+  ].join('\n');
+  const body = trace.events
+    .map(e => e.t.toFixed(3) + ' ' + e.d.map(b => b.toString(16).padStart(2, '0')).join(' '))
+    .join('\n');
+  const blob = new Blob([head + '\n' + body + '\n'], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trace.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+};
+
+navigator.requestMIDIAccess({ sysex: false }).then(a => {
+  access = a;
+  access.onstatechange = refreshPorts;
+  refreshPorts();
+  $('rec').disabled = false;
+  log('MIDI access granted.');
+}).catch(error => {
+  $('port').innerHTML = '<option>— refused —</option>';
+  log('MIDI access refused: ' + error.message
+      + '\nWeb MIDI needs a secure context. Serve over localhost rather than opening the file.');
+});
+</script>
