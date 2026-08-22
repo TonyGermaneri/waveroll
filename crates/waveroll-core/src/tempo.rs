@@ -152,6 +152,18 @@ impl TempoMap {
         e.meter.quarters_per_bar() * 60.0 * self.sample_rate / e.bpm
     }
 
+    /// Tempo and meter changes strictly inside `(start, end)`, oldest first.
+    ///
+    /// Exported clips need these: a MIDI file whose tempo track stops at the first value would play
+    /// back at the wrong speed for everything after a change, and unlike audio there is no waveform
+    /// to notice it against.
+    pub fn changes_in(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, f64, Meter)> + '_ {
+        self.entries
+            .iter()
+            .filter(move |e| e.frame > start && e.frame < end)
+            .map(|e| (e.frame, e.bpm, e.meter))
+    }
+
     /// Number of segments. Only useful for asserting that a clock is not appending noise.
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { false }
