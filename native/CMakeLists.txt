@@ -25,19 +25,42 @@ FetchContent_Declare(JUCE
   GIT_PROGRESS TRUE)
 FetchContent_MakeAvailable(JUCE)
 
-# Corrosion builds the Rust core and hands CMake a target to link. It also handles the universal
-# build: with two OSX architectures it compiles both Rust targets and lipos them, which is the
-# thing that is tedious to do by hand and easy to get silently half-right.
-FetchContent_Declare(Corrosion
-  GIT_REPOSITORY https://github.com/corrosion-rs/corrosion.git
-  GIT_TAG v0.5.2
-  GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(Corrosion)
+# The Rust core, built by hand rather than through Corrosion.
+#
+# Corrosion was here for exactly one reason -- the universal build -- and it does not do it: it
+# builds a single Rust target and never looks at CMAKE_OSX_ARCHITECTURES, so the C++ came out
+# universal and the Rust arm64-only, and the x86_64 link failed on every wr_ symbol. Twenty lines
+# of cargo and lipo do the job with no dependency and no surprises.
+set(WAVEROLL_RUST_TARGETS "")
+set(WAVEROLL_RUST_SLICES "")
+foreach(arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+  if(arch STREQUAL "arm64")
+    set(triple aarch64-apple-darwin)
+  elseif(arch STREQUAL "x86_64")
+    set(triple x86_64-apple-darwin)
+  else()
+    message(FATAL_ERROR "no Rust triple known for architecture ${arch}")
+  endif()
+  list(APPEND WAVEROLL_RUST_TARGETS --target ${triple})
+  list(APPEND WAVEROLL_RUST_SLICES
+       "${CMAKE_CURRENT_SOURCE_DIR}/../target/${triple}/release/libwaveroll_ffi.a")
+endforeach()
 
-corrosion_import_crate(
-  MANIFEST_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../crates/waveroll-ffi/Cargo.toml"
-  CRATES waveroll-ffi
-  PROFILE release)
+set(WAVEROLL_RUST_LIB "${CMAKE_CURRENT_BINARY_DIR}/libwaveroll_ffi.a")
+
+# Always run: cargo is already incremental and decides for itself whether anything changed, which
+# is a better judge than a DEPENDS list that goes stale the first time a file is added.
+add_custom_target(waveroll_rust ALL
+  COMMAND cargo build --release
+          --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/../Cargo.toml"
+          -p waveroll-ffi ${WAVEROLL_RUST_TARGETS}
+  COMMAND lipo -create ${WAVEROLL_RUST_SLICES} -output "${WAVEROLL_RUST_LIB}"
+  BYPRODUCTS "${WAVEROLL_RUST_LIB}"
+  COMMENT "Building the Rust core for ${CMAKE_OSX_ARCHITECTURES}"
+  VERBATIM)
+
+add_library(waveroll_ffi INTERFACE)
+target_link_libraries(waveroll_ffi INTERFACE "${WAVEROLL_RUST_LIB}")
 
 juce_add_plugin(Waveroll
   COMPANY_NAME "Waveroll"
@@ -68,6 +91,8 @@ target_compile_definitions(Waveroll PUBLIC
 # copy of the unwinder along, and if it lands ahead of the C++ runtime on the link line the
 # resolution of __cxa_init_primary_exception goes to the wrong one and fails with a bare
 # "symbol(s) not found".
+add_dependencies(Waveroll waveroll_rust)
+
 target_link_libraries(Waveroll PRIVATE
   juce::juce_audio_utils
   waveroll_ffi
