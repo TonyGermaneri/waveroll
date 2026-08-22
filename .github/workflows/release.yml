@@ -19,7 +19,7 @@ jobs:
     name: macOS
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Install the toolchain
@@ -53,7 +53,7 @@ jobs:
     name: Web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -79,7 +79,7 @@ jobs:
     steps:
       # The tags are needed to work out what the previous release was, which is what the changelog
       # in the notes is computed against.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - uses: actions/download-artifact@v4
@@ -89,7 +89,9 @@ jobs:
         run: |
           mkdir -p dist
           find incoming -name '*.zip' -exec mv {} dist/ \;
-          cd dist && sha256sum ./*.zip | sed 's| \./| |' | tee SHA256SUMS.txt
+          # The ./ is stripped but the two spaces are not: sha256sum -c wants exactly the
+          # format sha256sum wrote, and collapsing the separator makes the file unverifiable.
+          cd dist && sha256sum ./*.zip | sed 's|\./||' | tee SHA256SUMS.txt
 
       - name: Write the notes
         run: tools/release-notes.sh "${{ github.ref_name }}" > dist/NOTES.md

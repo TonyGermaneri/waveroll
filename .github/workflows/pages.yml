@@ -29,7 +29,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -42,13 +42,30 @@ jobs:
       - name: Build the site
         run: tools/package-web.sh ${{ github.sha }}
 
-      # enablement turns Pages on for the repository if it is off, so this works on a fresh repo
-      # without anybody visiting the settings page first.
-      - uses: actions/configure-pages@v5
-        with:
-          enablement: true
-      - uses: actions/upload-pages-artifact@v3
+      # Pages has to be switched on by hand, once. The obvious-looking shortcut -- passing
+      # enablement: true to configure-pages -- cannot work: creating a Pages site is an
+      # administration-scoped API, and no GITHUB_TOKEN can hold that scope however the workflow
+      # asks for it. So this checks instead of assuming, and reports rather than failing: a build
+      # that goes red every push until somebody visits a settings page teaches people to ignore
+      # red builds.
+      - name: Is Pages switched on?
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/${{ github.repository }}/pages" >/dev/null 2>&1; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Pages is not switched on::The site built. To publish it, go to           Settings -> Pages -> Build and deployment and set Source to GitHub Actions. This job           will deploy on the next push. Until then it builds only."
+          fi
+
+      - if: steps.pages.outputs.ready == 'true'
+        uses: actions/configure-pages@v6
+      - if: steps.pages.outputs.ready == 'true'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: dist/web
-      - id: deployment
+      - if: steps.pages.outputs.ready == 'true'
+        id: deployment
         uses: actions/deploy-pages@v4

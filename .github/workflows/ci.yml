@@ -25,7 +25,7 @@ jobs:
     name: Rust
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the toolchain
         run: |
           rustup toolchain install stable --profile minimal -c clippy
@@ -55,7 +55,7 @@ jobs:
     name: Web
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install the toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -82,7 +82,7 @@ jobs:
     steps:
       # Unshallow: the build stamp and the plug-in version both come from the commit count, and a
       # depth-1 checkout would report every build as the first one.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Install the toolchain

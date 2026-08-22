@@ -187,10 +187,15 @@ without saying why. The release notes carry the `xattr -dr com.apple.quarantine`
 needs a paid Developer ID certificate and an app-specific password in repository secrets; until
 those exist, saying so is better than shipping a plug-in that appears not to work.
 
-Pushing to `main` also deploys the browser build to GitHub Pages. It is hosted without the COOP and
-COEP headers Pages cannot set, so `SharedArrayBuffer` is unavailable there and `web/src/ring.js`
-falls back to a plain `ArrayBuffer` — correct, one copy slower. `web/serve.py` sets those headers,
-so a local run gets the shared path.
+Pushing to `main` also deploys the browser build to GitHub Pages — **once Pages has been switched
+on by hand**, under Settings → Pages → Build and deployment → Source: *GitHub Actions*. That step
+cannot be automated: creating a Pages site is an administration-scoped API and no `GITHUB_TOKEN` can
+hold that scope, whatever the workflow asks for. Until it is switched on the job builds the site,
+skips the deploy, and says so in a notice rather than going red.
+
+Pages cannot set the COOP and COEP headers, so the hosted copy is not cross-origin isolated:
+`SharedArrayBuffer` is unavailable there and `web/src/ring.js` falls back to a plain `ArrayBuffer` —
+correct, one copy slower. `web/serve.py` sets those headers, so a local run gets the shared path.
 
 ## Decisions of record
 
