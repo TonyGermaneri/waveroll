@@ -233,7 +233,7 @@ fn a_selection_erodes_as_the_head_reaches_it_rather_than_vanishing() {
     // when the window's old edge falls partway through a bar. That is the price of a selection
     // that always loops, and it is paid here rather than hidden.
     assert!(
-        before >= 15.0 && before <= 16.0,
+        (15.0..=16.0).contains(&before),
         "expected the most whole bars that fit in sixteen, got {before}"
     );
 

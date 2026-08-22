@@ -1,0 +1,82 @@
+# What has to be true before anything is believed.
+#
+# macOS because the plugin is the product and AU exists nowhere else. The GPU tests skip rather
+# than fail when a runner has no usable adapter — a hosted runner often does not — which is why
+# they were written to announce a skip instead of passing silently.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal -c clippy
+          rustup target add wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+
+      # Not --workspace: waveroll-wasm only compiles for wasm32, so it is excluded through
+      # default-members, and --workspace overrides that and fails the build.
+      - name: Test
+        run: cargo test --verbose
+      # Denied on the command line rather than through RUSTFLAGS, which would apply to every
+      # dependency as well and fail the build on somebody else's warning.
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The portability claim, checked rather than asserted: the same core has to compile for the
+      # browser as well as for native.
+      - name: Build for wasm
+        run: |
+          cargo clippy -p waveroll-wasm --target wasm32-unknown-unknown -- -D warnings
+          cargo build -p waveroll-core --target wasm32-unknown-unknown
+
+  plugin:
+    name: Plugin
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Ninja
+        run: brew list ninja >/dev/null 2>&1 || brew install ninja
+
+      # The generator is named explicitly. Configuring without -G falls back to Makefiles, and if a
+      # build.ninja is already lying around the next build fails with "make: Makefile: No such
+      # file" and names nothing useful.
+      - name: Configure
+        run: cmake -B native/build -S native -G Ninja
+      - name: Build AU, VST3 and standalone
+        run: cmake --build native/build
+
+      # Logic will not load a plugin that fails this, and its complaints are about things --
+      # render-in-place, reset behaviour, channel configurations -- that are invisible until
+      # somebody reports the plugin simply is not in the list.
+      - name: Validate the Audio Unit
+        run: |
+          killall -9 AudioComponentRegistrar || true
+          sleep 2
+          auval -v aumf Wvr1 Wvrl
+
+      - name: Check the binaries are universal
+        run: |
+          for slice in AU/Waveroll.component VST3/Waveroll.vst3 Standalone/Waveroll.app; do
+            binary="native/build/Waveroll_artefacts/$slice/Contents/MacOS/Waveroll"
+            archs=$(lipo -archs "$binary")
+            echo "$slice: $archs"
+            [ "$archs" = "x86_64 arm64" ] || { echo "not universal"; exit 1; }
+          done

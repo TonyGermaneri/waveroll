@@ -1,146 +1,163 @@
 # Waveroll
 
-A rolling sampler. It captures the last sixteen bars of whatever the DAW is playing, and lets you
-select a bar-quantised region and drag it straight into the session as a file.
+A rolling sampler. It sits on a track as an audio effect, keeps the last sixteen bars of whatever
+that track is playing, and lets you select a bar-quantised region of it and drag it straight into
+the session — as audio, and as the MIDI that played it.
 
-It makes no sound. Recording and dragging is the whole job; the DAW is what plays audio.
+It makes no sound of its own. Capturing and handing over a file is the whole job; the DAW is what
+plays audio. On a mix bus it is provably invisible: `processBlock` reads the buffer and returns
+without writing to it, so there is no line of code in the audio path that could alter the signal.
 
-Full build plan, including the reasoning behind everything below:
+Full build plan and the reasoning behind the decisions below:
 <https://claude.ai/code/artifact/8fac4c8d-7b68-405a-840e-5da3ba29627c>
+
+## Using it
+
+Drop it on a track and press play. Capture follows the host transport — no transport, no capture —
+and refuses offline renders, so bouncing a track cannot overwrite the take with the bounce.
+
+**To take something: drag from inside the selection.** Anywhere else starts a new selection, and
+`alt` forces a new one even over the old. The cursor says which you will get. Drop onto the
+arrangement or onto a Session clip slot; both work. If MIDI played over the selection, two files
+are dragged and the host makes two tracks.
+
+| | |
+| --- | --- |
+| `1`–`9`, `0` | Select the last N×10% of the window, ending at the head |
+| `m` · `n` | Drop a marker · select from the last marker to now |
+| `h` | Hold — freeze the picture; capture carries on underneath |
+| `s` | Send: write the take out without dragging |
+| `d` | Set downbeat — re-phase the bar lines to now |
+| `esc` | Clear the selection |
+| `,` `.` | Grid finer / coarser: `auto · 1/32 · 1/16 · 1/8 · 1/4 · 1/2 · 1 · 2 · 4` bars |
+| `[` `]` | Window length: 4 · 8 · 16 · 32 · 64 · 128 bars |
+| scroll · `\` | Zoom about the pointer · fit to width |
+
+Everything on that list is also in the footer, and grid, zoom and fit have buttons beside them.
+
+Two behaviours worth knowing because they look like faults and are not. **Selections are made of
+whole cells**, so "100%" is the most whole bars that fit rather than exactly the window — the price
+of a selection that always loops. And **a selection erodes** as the write head sweeps into it,
+giving up whole cells from the old end rather than vanishing; hold freezes that along with the
+picture.
+
+## Building it
+
+The plugin is the product. AU, VST3 and a standalone app come out of one target, all universal, and
+the AU and VST3 install themselves.
+
+```
+cmake -B native/build -S native -G Ninja     # -G matters; see below
+cmake --build native/build
+auval -v aumf Wvr1 Wvrl                      # Logic will not load a plugin that fails this
+```
+
+Pass the generator explicitly. Configuring without `-G` falls back to Makefiles, and if a
+`build.ninja` is already lying about the next build fails with `make: Makefile: No such file` and
+names nothing useful.
+
+The browser build is a shop window rather than a target — it does everything except hand another
+application a file path, which no web API can do:
+
+```
+wasm-pack build --target web --dev --out-dir ../../web/pkg crates/waveroll-wasm
+python3 web/serve.py                         # then open localhost:8788/?demo
+```
+
+The Rust on its own:
+
+```
+cargo test                                   # not --workspace; see below
+cargo clippy --all-targets -- -D warnings
+```
+
+**Not `--workspace`.** `waveroll-wasm` only compiles for `wasm32` — `SurfaceTarget::Canvas` is
+`cfg(web)` — so it is excluded through `default-members`, and `--workspace` overrides that and
+fails the build. Plain `cargo test` is what CI runs.
+
+## Layout
+
+```
+crates/
+  waveroll-core/    Rust. No I/O, no UI, no platform. Compiles to wasm and to native.
+    ring.rs           wait-free SPSC ring, planar f32, overwriting
+    tempo.rs          TempoMap: capture frames -> quarters -> bars, with a history
+    grid.rs           the unit ladder, snapping, erosion, the number row
+    view.rs           the wrapping display: laps, columns, zoom, where a bar is shown
+    clock.rs          transport, the capture rule, MIDI clock estimation
+    midi.rs           the MIDI event ring and note pairing
+    wav.rs            WAV, with the BWF and ACID chunks that place and warp the drop
+    smf.rs            Standard MIDI File, and the selection boundary policy
+  waveroll-gpu/     Rust + wgpu. One WGSL, four backends.
+    shaders/          vendored from waveshape, unchanged, read-only
+    fft.rs            twiddles, the Stockham stage schedule, the ping-pong
+    envelope.rs       the ring mirrored on the GPU, reduced to one value per column
+    render.rs         the waveform; overlay.rs the grid, selection and head
+    reference.rs      an O(N^2) f64 DFT: the oracle, sharing no code with the shaders
+  waveroll-ffi/     The C ABI the JUCE shell talks to. No logic of its own.
+  waveroll-wasm/    The browser binding: one object the page drives.
+native/
+  CMakeLists.txt    JUCE, and the Rust core built universal by hand
+  Source/           the processor, the editor, and one .mm for the Metal view
+web/                a page that drives the wasm build; no behaviour of its own
+tools/
+  clock-trace.html  captures a MIDI clock stream for tests/replay.rs
+```
+
+The shape is one rule: **everything that decides anything is in Rust.** What a click selects, where
+the bar lines fall, which side of the head a column reads from, whether a block is captured, what
+bytes a file is made of. C++ owns plugin formats, a window and the file drag; JavaScript owns
+devices, events and a canvas. Neither owns a decision. That is why the same behaviour can appear in
+a plugin and in a browser without being written twice and kept in step by hand.
+
+## How it is verified
+
+`cargo test` runs 155 checks. The ones worth knowing about are the ones that check against
+something other than themselves.
+
+| | |
+| --- | --- |
+| `afinfo` | CoreAudio — the code Logic opens files with — agrees with the header at all three depths, down to the exact payload byte count, which is what proves the chunk padding. |
+| `ffprobe` | An independent implementation reports the same codec, rate, channels and an exact duration. |
+| `fluidsynth` | An independent sequencer renders the MIDI clip. Its voice-decay tail makes an absolute duration brittle, so the check is *differential*: halving the tempo must add exactly eight seconds to a four-bar clip, which cancels the tail and can only come out right if PPQ, the tempo meta and every delta time are correct. |
+| `reference.rs` | An O(N²) `f64` transform written from the definition, sharing no code with the shaders. A GPU FFT can be wrong in ways that still look like a spectrum. |
+| `tests/replay.rs` | A real MIDI clock stream captured from Ableton, replayed. The synthetic tests cover the jitter someone thought to write down; this covers jitter nobody designed. |
+
+Each skips loudly when its tool or its data is absent, so none of them is ever the reason a fresh
+checkout goes red.
+
+Three areas are tested where the bugs actually live rather than where they are easy to reach.
+`crates/waveroll-ffi/tests/abi.rs` drives all 31 entry points, including every one of them with a
+null core in a single test — a host unloading a plugin mid-callback has to get a call that does
+nothing rather than a fault inside somebody's session. `crates/waveroll-core/tests/ring_threads.rs`
+runs the ring on two threads at the plugin's own ratio of ring to read, because every other ring
+test runs on one thread, which is the condition under which its interesting failures cannot happen.
+And `crates/waveroll-gpu/tests/render.rs` asserts on pixels, because everything between the ring
+and the screen is arithmetic that produces something plausible when it is wrong.
+
+CI runs all of it on macOS, plus the plugin build, `auval`, and a check that all three binaries are
+universal.
 
 ## Decisions of record
 
 | | |
 | --- | --- |
 | **Quantise units** | Fractions of a **bar**. "1" is one bar. Ladder 1/32 … 4. |
-| **Number row** | Head to tail — the last N×10% of the window, ending at the write head. |
-| **Window** | 16 bars by default, set in bars. Allocation is sized for the maximum. |
+| **Number row** | Head to tail — the last N×10% of the window, as whole cells. |
+| **Window** | 16 bars by default, set in bars; the ring is allocated for the maximum. |
 | **Lanes** | One stereo lane. An audio effect sees one bus. |
-| **Capture** | Follows the host transport. No transport, no capture. |
-| **Clock** | Ableton Link and MIDI clock, behind one `ClockSource`. |
+| **Capture** | Follows the host transport, and refuses offline renders. |
+| **Clock** | Host transport in the plugin; MIDI clock in the browser, behind one `ClockSource`. |
 | **Audio output** | None, by design. The plugin passes audio through untouched. |
-| **Targets** | Web PWA (GitHub Pages) · AU · VST3 · CLAP · standalone. |
-| **Plugin shell** | JUCE, which is why AU is in that list. Electron is not. |
+| **Targets** | AU · VST3 · standalone, universal. Web PWA as a shop window. |
+| **Plugin shell** | JUCE, which is why AU is in that list. |
 
-## Layout
+One is still open: the plugin registers as `aumf`, a MIDI-controlled effect, because it takes MIDI
+for the MIDI lane. That puts it under *AU MIDI-controlled Effects* in Logic rather than with the
+ordinary audio effects, which is a worse place to be found. MIDI input or a natural home in the
+menu — a plugin cannot be both, and it is cheap to change until somebody has sets saved with it.
 
-```
-crates/
-  waveroll-gpu/     Rust + wgpu. One WGSL, four backends.
-    shaders/          vendored from waveshape, unchanged, read-only
-    device.rs         headless adapter, and a block_on too small to be a dependency
-    fft.rs            twiddles, the Stockham stage schedule, the ping-pong
-    reference.rs      an O(N^2) f64 DFT: the oracle, sharing no code with the shaders
-  waveroll-core/    Rust. No I/O, no UI, no platform.
-    ring.rs           wait-free SPSC ring, planar f32, overwriting
-    tempo.rs          TempoMap: capture frames -> quarters -> bars
-    grid.rs           the unit ladder, click/drag snapping, the number row
-    clock.rs          transport, the capture rule, MIDI clock estimation
-    wav.rs            WAV with the BWF and ACID chunks that place the drop
-    smf.rs            Standard MIDI File, and the selection boundary policy
-tools/
-  clock-trace.html  captures a MIDI clock stream for tests/replay.rs
-```
-
-Everything in `waveroll-core` compiles unchanged to `wasm32-unknown-unknown` and to native. That
-is the property that lets one implementation serve the browser, the standalone app and the plugin,
-and it is checked in CI rather than assumed.
-
-```
-cargo test                                              # the native crates
-cargo clippy --all-targets
-cargo clippy -p waveroll-wasm --target wasm32-unknown-unknown
-wasm-pack build --target web --dev --out-dir ../../web/pkg crates/waveroll-wasm
-python3 web/serve.py                                    # then open localhost:8788/?demo
-```
-
-**Not `--workspace`.** `waveroll-wasm` only compiles for `wasm32` — `SurfaceTarget::Canvas` is
-`cfg(web)` — so it is excluded via `default-members`, and `--workspace` overrides that and fails
-the build. Plain `cargo test` is what CI runs.
-
-## Verification
-
-Written files are checked against decoders that did not write them, because a chunk layout can be
-internally consistent, pass every one of its own assertions, and still be a file a host refuses.
-
-| Tool | What it proves |
-| --- | --- |
-| `afinfo` | CoreAudio — the code Logic itself opens files with — agrees with the header, at all three depths. |
-| `ffprobe` | An entirely independent implementation reports the same codec, rate, channels and an exact duration. |
-| `naga` | wgpu's own shader compiler validates the vendored WGSL and translates it to Metal and SPIR-V. See below. |
-| `fluidsynth` | An independent sequencer renders the MIDI clip. Its voice-decay tail makes an absolute duration brittle, so the test is *differential*: halving the tempo must add exactly eight seconds to a four-bar clip, which cancels the tail and can only come out right if PPQ, the tempo meta and the delta times are all correct. |
-
-Each skips loudly when its tool is absent, so none of them is ever the reason a fresh checkout
-goes red.
-
-### Spike 3, first half — one shader set, four backends
-
-waveshape's shaders already targeted WebGPU, and WGSL is wgpu's native shading language, so they
-vendor unchanged. `naga` 29.0.3 — the compiler wgpu 26 uses — validates all three and translates
-them to both native backends, emitting all four kernels:
-
-```
-prepare  -> metal 2618 B   spv 3676 B
-fft      -> metal 3372 B   spv 4868 B     radix2_ and radix4_ both emitted
-unpack   -> metal 1535 B   spv 2552 B
-```
-
-That is the portability claim at the compiler level. The second half is `tests/selftest.rs`, which
-runs the chain and compares it against `reference.rs` — an O(N²) `f64` transform written straight
-from the definition, sharing no code with the shaders. Measured on Apple M3 Max, Metal:
-
-| N | bins | max error | rms error | |
-| --- | --- | --- | --- | --- |
-| 512 | 257 | 7.181e-6 % | 1.086e-6 % | |
-| 1024 | 513 | 4.441e-6 % | 7.098e-7 % | radix-2 stage first |
-| 2048 | 1025 | 1.185e-5 % | 7.069e-7 % | |
-| 4096 | 2049 | 8.228e-6 % | 4.438e-7 % | radix-2 stage first |
-| 8192 | 4097 | 9.573e-6 % | 3.215e-7 % | |
-
-waveshape publishes 3.2e-6 % max and 3.3e-7 % rms for the same chain under WebGPU. The rms figures
-agree to the digit; the max differs because it is a different test signal over a different set of
-sizes, and max-of-N is the noisier statistic of the two. **Same shaders, same arithmetic, different
-backend.**
-
-Both parities of `log2(N/2)` are covered deliberately: an odd one runs a radix-2 stage ahead of the
-radix-4 chain, and that stage exists at no other size. Two structural checks sit alongside — an
-impulse must be flat in every bin, and a tone exactly on a bin centre under a rectangular window
-must leave every other bin at zero *and* land negative-imaginary, since a conjugated twiddle table
-is invisible to any magnitude comparison and fatal to reassignment.
-
-**A trap, recorded because it cost real time.** `naga <file> --stdin-file-path <name>` does not
-validate `<file>`: with `--stdin-file-path` set, naga reads the shader from **stdin** and treats
-the positional argument as an **output** file. Run that against a source tree and it silently
-truncates every shader to an empty module, which then validates perfectly. The shaders are
-`chmod 444` so it cannot happen twice. Validate with `naga <file>` and nothing else.
-
-## Spikes — these need a human
-
-Three questions cannot be answered from a terminal. They gate phases 8 and 9, not phase 1, so the
-core is being built in parallel; none of its behaviour depends on how they come out.
-
-**1. Drag out of a plugin editor** — needs you. *The browser half is answered, below.* A stock JUCE plugin with one button calling
-`performExternalDragDropOfFiles` on a four-bar WAV, loaded into Live and Logic, dragged into the
-host's own arrangement. Dragging out of a plugin is strictly harder than out of an app, so proving
-it there proves it everywhere. Then fire the same call from a callback invoked *synchronously*
-inside a mouse handler rather than from a button — on macOS a drag session must start while the
-originating event is still current, and that is the one place the Rust/C++ boundary is awkward.
-
-**2. MIDI clock, and Link** — needs you. Ten minutes of raw bytes from Live over an IAC bus. Four questions the
-specs will not answer: jitter on `F8`; whether Song Position Pointer is *ever* sent; what arrives
-during a tempo ramp; what arrives on a loop jump. Then the same session under Link, confirming its
-start/stop state is present — transport-gated capture depends on it.
-
-**3. wgpu in wasm, against a known number.** waveshape's FFT self-test measures `3.2e-6 %` max
-error against an f64 CPU reference. Getting the same figure from wgpu-on-WebGPU *and*
-wgpu-on-Metal is the evidence that one renderer can serve every target. Unlike the other two this
-one is not human-gated: the Metal half runs headless in CI, and the browser half can be driven
-from a devtools session.
-
-Record the results here, with host versions and dates. They will rot, and knowing when they were
-last true is the point.
-
-### Results
+## What was measured
 
 **Spike 1 — a JUCE plugin drags into Live's arrangement. It works. 22 Aug 2026.**
 `DragAndDropContainer::performExternalDragDropOfFiles`, called synchronously from `mouseDrag`, out

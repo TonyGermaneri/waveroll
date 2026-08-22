@@ -12,6 +12,12 @@
 //! and does nothing, because a crash inside somebody's DAW is the worst possible failure mode and
 //! "the plugin did nothing" is a far better one than "the host died".
 
+// Every function here takes raw pointers from C and dereferences them; that is what a C ABI is.
+// Marking each one `unsafe fn` would not change the ABI, would not tell the C caller anything, and
+// would only add noise to the Rust tests that drive them. The contract each relies on is written
+// in its own doc comment, and `guard` catches what gets it wrong.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 mod view;
 
 use std::ffi::c_void;
@@ -102,6 +108,14 @@ pub struct WrCore {
 
 /// Turns a raw pointer into a reference, or does nothing.
 macro_rules! core_ref {
+    // Unit first, and it must come first: `$fallback:expr` would otherwise match `()` and expand
+    // to `return ()`, which is the same thing said more loudly.
+    ($ptr:expr, ()) => {
+        match unsafe { ($ptr as *mut WrCore).as_mut() } {
+            Some(core) => core,
+            None => return,
+        }
+    };
     ($ptr:expr) => {
         match unsafe { ($ptr as *mut WrCore).as_mut() } {
             Some(core) => core,
