@@ -391,3 +391,177 @@ mod phase_tests {
         assert_eq!(dragged.start, downbeat);
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Drawing the grid
+// ---------------------------------------------------------------------------------------
+
+use crate::view::Viewport;
+
+/// How prominent a grid line is. The renderer picks colours; this only says what the line *means*.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rule {
+    /// A lap boundary — where the display wraps.
+    Lap,
+    /// A bar line.
+    Bar,
+    /// A sub-bar cell boundary at the current quantise unit.
+    Cell,
+}
+
+/// One vertical line, positioned as a fraction of the canvas width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ruling {
+    pub fraction: f64,
+    pub rule: Rule,
+}
+
+/// The most lines that will be emitted before the sub-bar ones are dropped.
+///
+/// A guard, not a design: auto units keep the count near the canvas width, but a *fixed* small unit
+/// at full zoom-out can ask for thousands of lines that would land on top of each other anyway. Bar
+/// lines survive the cull, because losing those loses the reading of the picture.
+pub const MAX_RULINGS: usize = 2048;
+
+/// Every grid line visible in `viewport`, left to right.
+///
+/// Positions are computed in bars and converted to canvas fractions, never the reverse: a line has
+/// to sit exactly where a snapped selection edge would, and rounding through pixels first would put
+/// the two a fraction of a pixel apart at some zoom levels and not others.
+pub fn rulings(viewport: &Viewport, unit_bars: f64, out: &mut Vec<Ruling>) {
+    out.clear();
+    let unit = guard_unit(unit_bars);
+    let left = viewport.left_bars;
+    let right = left + viewport.span_bars;
+
+    // Sub-bar lines are dropped wholesale rather than thinned, so the grid never shows an
+    // irregular subset of a regular thing — which reads as missing lines rather than as a coarser
+    // grid, and is worse than showing none.
+    let cells = (viewport.span_bars / unit).ceil() as usize + 2;
+    let with_cells = unit < 1.0 && cells <= MAX_RULINGS;
+
+    let step = if with_cells { unit } else { 1.0 };
+    let first = (left / step).floor() * step;
+    let mut at = first;
+    // Counted rather than compared, because accumulating `step` in floating point drifts and the
+    // loop bound would then depend on how far into the session the view happens to be.
+    let count = ((right - first) / step).floor() as i64 + 1;
+    for _ in 0..count.max(0) {
+        let fraction = viewport.fraction_at(at);
+        if (-0.001..=1.001).contains(&fraction) {
+            let on_bar = (at - at.round()).abs() < 1e-6;
+            let on_lap = (at % viewport.window_bars).abs() < 1e-6
+                || (at % viewport.window_bars - viewport.window_bars).abs() < 1e-6;
+            out.push(Ruling {
+                fraction,
+                rule: if on_lap {
+                    Rule::Lap
+                } else if on_bar {
+                    Rule::Bar
+                } else {
+                    Rule::Cell
+                },
+            });
+        }
+        at += step;
+    }
+}
+
+#[cfg(test)]
+mod ruling_tests {
+    use super::*;
+    use crate::tempo::Meter;
+    use crate::view::View;
+
+    fn setup(zoom: f64) -> (TempoMap, Viewport) {
+        let m = TempoMap::new(48_000, 120.0, Meter::FOUR_FOUR);
+        let mut view = View::new(16.0);
+        view.zoom = zoom;
+        view.clamp();
+        let vp = Viewport::resolve(&view, &m, m.frame_at_bars(40.0), 1600);
+        (m, vp)
+    }
+
+    #[test]
+    fn fitted_at_one_bar_there_are_seventeen_lines() {
+        let (_m, vp) = setup(1.0);
+        let mut out = Vec::new();
+        rulings(&vp, 1.0, &mut out);
+        // Sixteen bars, so seventeen boundaries counting both ends.
+        assert_eq!(out.len(), 17, "got {:?}", out.iter().map(|r| r.fraction).collect::<Vec<_>>());
+        assert!((out[0].fraction - 0.0).abs() < 1e-9);
+        assert!((out[16].fraction - 1.0).abs() < 1e-9);
+        // Evenly spaced, which is the property a wrapping display exists to provide.
+        for pair in out.windows(2) {
+            assert!((pair[1].fraction - pair[0].fraction - 1.0 / 16.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn the_lap_boundaries_outrank_the_bar_lines() {
+        let (_m, vp) = setup(1.0);
+        let mut out = Vec::new();
+        rulings(&vp, 1.0, &mut out);
+        assert_eq!(out[0].rule, Rule::Lap, "the start of the lap is where the display wraps");
+        assert_eq!(out[16].rule, Rule::Lap, "and so is the end");
+        assert!(out[1..16].iter().all(|r| r.rule == Rule::Bar));
+    }
+
+    #[test]
+    fn sub_bar_units_add_cells_without_losing_the_bars() {
+        let (_m, vp) = setup(1.0);
+        let mut out = Vec::new();
+        rulings(&vp, 0.25, &mut out);
+        assert_eq!(out.len(), 65, "sixteen bars of quarter-bar cells");
+        let bars = out.iter().filter(|r| r.rule != Rule::Cell).count();
+        assert_eq!(bars, 17, "every bar line survives the finer grid");
+    }
+
+    #[test]
+    fn an_absurdly_fine_unit_drops_the_cells_rather_than_thinning_them() {
+        let (_m, vp) = setup(1.0);
+        let mut out = Vec::new();
+        // 1/512 of a bar over sixteen bars is 8192 lines, all inside a pixel of each other.
+        rulings(&vp, 1.0 / 512.0, &mut out);
+        assert_eq!(out.len(), 17, "it should fall back to bar lines, not draw an irregular subset");
+        assert!(out.iter().all(|r| r.rule != Rule::Cell));
+    }
+
+    #[test]
+    fn zoomed_in_the_lines_still_land_on_the_grid() {
+        let (m, vp) = setup(8.0);
+        let mut out = Vec::new();
+        rulings(&vp, 0.25, &mut out);
+        assert!(!out.is_empty());
+        for ruling in &out {
+            assert!((-0.001..=1.001).contains(&ruling.fraction), "off screen: {ruling:?}");
+            // The line must sit exactly where a snapped selection edge would, or the two disagree
+            // by a fraction of a pixel at some zoom levels and not others.
+            let bars = vp.bars_at(ruling.fraction);
+            let snapped = cell_at(&m, 0.25, m.frame_at_bars(bars));
+            let edge = m.bars_at(snapped.start);
+            assert!(
+                (bars - edge).abs() < 1e-6,
+                "a ruling at {bars} bars is not on a cell boundary ({edge})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tempo_change_does_not_bend_the_grid() {
+        let mut m = TempoMap::new(48_000, 120.0, Meter::FOUR_FOUR);
+        m.push(m.frame_at_bars(36.0), 174.0, Meter::FOUR_FOUR);
+        let view = View::new(16.0);
+        let vp = Viewport::resolve(&view, &m, m.frame_at_bars(44.0), 1600);
+        let mut out = Vec::new();
+        rulings(&vp, 1.0, &mut out);
+        // Bars are bars whatever the tempo did: the spacing on screen stays uniform because the
+        // axis is musical time, not samples.
+        for pair in out.windows(2) {
+            assert!(
+                (pair[1].fraction - pair[0].fraction - 1.0 / 16.0).abs() < 1e-9,
+                "the grid stretched across the tempo change"
+            );
+        }
+    }
+}

@@ -253,8 +253,9 @@ impl EnvelopePass {
         rx.recv().expect("map_async always reports").expect("the readback buffer mapped");
 
         let data = slice.get_mapped_range();
-        let out = data
-            .chunks_exact(16)
+        let (rows, _) = data.as_chunks::<16>();
+        let out = rows
+            .iter()
             .map(|c| {
                 let f = |i: usize| f32::from_le_bytes(c[i..i + 4].try_into().expect("four bytes"));
                 Envelope { min: f(0), max: f(4), rms: f(8), written: f(12) > 0.5 }

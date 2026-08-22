@@ -348,10 +348,8 @@ mod tests {
         let wav = write(&[&left, &right], &WavSpec::new(48_000, Depth::F32), &WavMeta::none());
         let data = find(&wav, b"data").expect("data is mandatory");
         assert_eq!(data.len(), 4 * 2 * 4);
-        let read: Vec<f32> = data
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-            .collect();
+        let (words, _) = data.as_chunks::<4>();
+        let read: Vec<f32> = words.iter().map(|b| f32::from_le_bytes(*b)).collect();
         assert_eq!(read, vec![0.0, 0.25, 0.5, -0.25, -0.5, 0.0, 1.0, -1.0]);
     }
 
@@ -398,9 +396,11 @@ mod tests {
 
         let dithered = find(&a, b"data").unwrap();
         let truncated = find(&c, b"data").unwrap();
-        for (d, t) in dithered.chunks_exact(2).zip(truncated.chunks_exact(2)) {
-            let d = i16::from_le_bytes(d.try_into().unwrap()) as i32;
-            let t = i16::from_le_bytes(t.try_into().unwrap()) as i32;
+        let (dithered, _) = dithered.as_chunks::<2>();
+        let (truncated, _) = truncated.as_chunks::<2>();
+        for (d, t) in dithered.iter().zip(truncated) {
+            let d = i16::from_le_bytes(*d) as i32;
+            let t = i16::from_le_bytes(*t) as i32;
             assert!((d - t).abs() <= 1, "dither moved a sample by {} LSB", (d - t).abs());
         }
     }

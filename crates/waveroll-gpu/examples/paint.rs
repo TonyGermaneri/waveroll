@@ -8,12 +8,14 @@
 use std::f32::consts::TAU;
 use std::{env, fs};
 
+use waveroll_core::grid::{self, Ruling, Unit};
 use waveroll_core::ring;
 use waveroll_core::tempo::{Meter, TempoMap};
 use waveroll_core::view::{View, Viewport};
 use waveroll_gpu::device::Gpu;
 use waveroll_gpu::envelope::{EnvelopePass, RingMirror};
-use waveroll_gpu::render::{Style, Target, WaveformPass, TARGET_FORMAT};
+use waveroll_gpu::overlay::{Overlay, OverlayPass};
+use waveroll_gpu::render::{OverlayStyle, Style, Target, WaveformPass, TARGET_FORMAT};
 
 const SR: u32 = 48_000;
 const W: u32 = 1400;
@@ -64,6 +66,7 @@ fn main() {
     let mut envelope = EnvelopePass::new(&gpu, W);
     let target = Target::new(&gpu, W, H);
     let waveform = WaveformPass::new(&gpu, TARGET_FORMAT);
+    let overlay_pass = OverlayPass::new(&gpu, TARGET_FORMAT, 4096);
 
     let beat = 60.0 / 120.0;
     let frames = map.frame_at_bars(bars);
@@ -76,9 +79,32 @@ fn main() {
         mirror.sync(&gpu, &reader);
     }
 
-    let viewport = Viewport::resolve(&View::new(16.0), &map, written, W);
+    let view = View::new(16.0);
+    let viewport = Viewport::resolve(&view, &map, written, W);
     envelope.reduce(&gpu, &mirror, &viewport, &map, [1.0, 0.0]);
     waveform.draw(&gpu, &target, envelope.output(), W, &Style::default());
+
+    // Auto quantise, at the zoom the view is actually at.
+    let unit = Unit::Auto.bars(viewport.span_bars, f64::from(W));
+    let mut rulings: Vec<Ruling> = Vec::new();
+    grid::rulings(&viewport, unit, &mut rulings);
+
+    // A four-bar selection, snapped, as if the user had dragged across it.
+    let dragged_from = map.frame_at_bars(viewport.lap_start_bars + 4.3);
+    let dragged_to = map.frame_at_bars(viewport.lap_start_bars + 7.6);
+    let selection = grid::snap_range(&map, unit, dragged_from, dragged_to);
+
+    let style = OverlayStyle::default();
+    let mut overlay = Overlay::default();
+    overlay.begin(&target);
+    overlay.grid(&rulings, &style);
+    overlay.selection(
+        viewport.fraction_at(map.bars_at(selection.start)),
+        viewport.fraction_at(map.bars_at(selection.end)),
+        &style,
+    );
+    overlay.head(viewport.head_fraction(), &style);
+    overlay_pass.draw(&gpu, &target, &overlay);
 
     let pixels = target.read(&gpu);
     let mut bytes = Vec::with_capacity(pixels.len() * 4);
@@ -87,9 +113,13 @@ fn main() {
     }
     fs::write(&out, &bytes).expect("write");
     println!(
-        "{out}  {W}x{H}  lap {}  head at {:.1}% of the window  {:.0} samples per column",
+        "{out}  {W}x{H}  lap {}  head at {:.1}%  unit {unit} bars  {} rulings  \
+         selection {:.2}..{:.2} bars  {:.0} samples per column",
         viewport.lap,
         viewport.head_fraction() * 100.0,
+        rulings.len(),
+        map.bars_at(selection.start) - viewport.lap_start_bars,
+        map.bars_at(selection.end) - viewport.lap_start_bars,
         viewport.frames_per_column(&map)
     );
 }

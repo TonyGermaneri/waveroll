@@ -349,8 +349,9 @@ impl Analyzer {
         rx.recv().expect("map_async always reports").expect("the readback buffer mapped");
 
         let data = slice.get_mapped_range();
-        let out = data
-            .chunks_exact(8)
+        let (pairs, _) = data.as_chunks::<8>();
+        let out = pairs
+            .iter()
             .map(|c| {
                 (
                     f32::from_le_bytes(c[0..4].try_into().expect("four bytes")),

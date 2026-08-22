@@ -147,3 +147,129 @@ fn silence_leaves_a_line_rather_than_a_hole() {
     close(at(100, 32), style.rms, "silence still draws its centre line");
     close(at(100, 20), style.background, "but only a line");
 }
+
+// ---------------------------------------------------------------------------------------
+// The overlay
+// ---------------------------------------------------------------------------------------
+
+use waveroll_core::grid::{self, Ruling};
+use waveroll_gpu::overlay::{Overlay, OverlayPass};
+use waveroll_gpu::render::OverlayStyle;
+
+/// Draws a plain background plus the overlay, so the assertions are about the overlay alone.
+fn paint_overlay(
+    gpu: &Gpu,
+    build: impl FnOnce(&mut Overlay, &OverlayStyle),
+) -> (Vec<[u8; 4]>, OverlayStyle) {
+    let style = Style { background: [0.0, 0.0, 0.0, 1.0], ..Style::default() };
+    let overlay_style = OverlayStyle::default();
+    let target = Target::new(gpu, W, H);
+    let waveform = WaveformPass::new(gpu, TARGET_FORMAT);
+    let pass = OverlayPass::new(gpu, TARGET_FORMAT, 4096);
+
+    // An empty envelope buffer: the clear is what we want under the overlay.
+    let empty = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    waveform.draw(gpu, &target, &empty, 0, &style);
+
+    let mut overlay = Overlay::default();
+    overlay.begin(&target);
+    build(&mut overlay, &overlay_style);
+    pass.draw(gpu, &target, &overlay);
+    (target.read(gpu), overlay_style)
+}
+
+#[test]
+fn grid_lines_land_on_whole_pixel_columns() {
+    let Some(gpu) = gpu() else { return };
+    // Sixteen bars across 256 pixels: a bar line every sixteen columns, exactly.
+    let rulings: Vec<Ruling> = (0..=16)
+        .map(|i| Ruling {
+            fraction: f64::from(i) / 16.0,
+            rule: if i % 16 == 0 { grid::Rule::Lap } else { grid::Rule::Bar },
+        })
+        .collect();
+    let (pixels, _) = paint_overlay(&gpu, |o, s| o.grid(&rulings, s));
+
+    for i in 0..16 {
+        let x = i * 16;
+        let on = Target::pixel(&pixels, W, x, 10);
+        let off = Target::pixel(&pixels, W, x + 8, 10);
+        assert!(on[2] > 20, "expected a grid line at column {x}, got {on:?}");
+        assert!(off[2] < 8, "expected background between lines at {}, got {off:?}", x + 8);
+    }
+    // And a line is exactly one column wide, not smeared over two by a half-pixel position.
+    assert!(Target::pixel(&pixels, W, 17, 10)[2] < 8, "the bar line bled into the next column");
+}
+
+#[test]
+fn the_lap_boundary_reads_stronger_than_a_bar_line() {
+    let Some(gpu) = gpu() else { return };
+    let rulings = vec![
+        Ruling { fraction: 0.25, rule: grid::Rule::Bar },
+        Ruling { fraction: 0.5, rule: grid::Rule::Lap },
+        Ruling { fraction: 0.75, rule: grid::Rule::Cell },
+    ];
+    let (pixels, _) = paint_overlay(&gpu, |o, s| o.grid(&rulings, s));
+    let brightness = |x: u32| i32::from(Target::pixel(&pixels, W, x, 10)[2]);
+    let (cell, bar, lap) = (brightness(192), brightness(64), brightness(128));
+    assert!(lap > bar && bar > cell, "expected lap {lap} > bar {bar} > cell {cell}");
+}
+
+#[test]
+fn the_selection_tints_its_range_and_marks_both_edges() {
+    let Some(gpu) = gpu() else { return };
+    // Bars 4 to 8 of 16: a quarter to a half of the canvas.
+    let (pixels, style) = paint_overlay(&gpu, |o, s| o.selection(0.25, 0.5, s));
+    let at = |x: u32| Target::pixel(&pixels, W, x, 32);
+
+    assert!(at(40)[0] < 8, "outside the selection on the left");
+    assert!(at(200)[0] < 8, "outside the selection on the right");
+    // The fill is translucent: it tints without hiding what is under it.
+    let fill = at(96);
+    let expected_fill = (style.selection_fill[0] * style.selection_fill[3] * 255.0).round() as i32;
+    assert!(
+        (i32::from(fill[0]) - expected_fill).abs() <= 2,
+        "fill is {fill:?}, expected about {expected_fill} in red over black"
+    );
+    // Both edges are solid, and at the snapped positions.
+    let left = at(64);
+    let right = at(127);
+    assert!(left[0] > 180, "the left edge should be solid, got {left:?}");
+    assert!(right[0] > 180, "the right edge should be solid, got {right:?}");
+    assert!(left[0] > fill[0] * 2, "an edge has to read as an edge against its own fill");
+}
+
+#[test]
+fn the_smallest_possible_selection_is_still_visible() {
+    let Some(gpu) = gpu() else { return };
+    // A selection narrower than a pixel — which the grid can produce at high zoom — must not
+    // vanish, or it is indistinguishable from having selected nothing.
+    let (pixels, _) = paint_overlay(&gpu, |o, s| o.selection(0.5, 0.5001, s));
+    let lit = (0..W).filter(|x| Target::pixel(&pixels, W, *x, 32)[0] > 100).count();
+    assert!(lit >= 1, "a sub-pixel selection disappeared entirely");
+    assert!(lit <= 3, "and it should not be smeared across {lit} columns");
+}
+
+#[test]
+fn the_head_is_drawn_over_everything_else() {
+    let Some(gpu) = gpu() else { return };
+    let rulings = vec![Ruling { fraction: 0.5, rule: grid::Rule::Lap }];
+    let (pixels, style) = paint_overlay(&gpu, |o, s| {
+        o.grid(&rulings, s);
+        o.selection(0.4, 0.6, s);
+        o.head(0.5, s);
+    });
+    let head = Target::pixel(&pixels, W, 128, 32);
+    // The head is red; a lap line and a selection edge share that column and must not win.
+    let expected = (style.head[0] * style.head[3] * 255.0).round() as i32;
+    assert!(
+        i32::from(head[0]) >= expected - 40,
+        "the head was buried under the grid: {head:?}"
+    );
+    assert!(head[0] > head[2], "the head should read red, not as the bluish grid: {head:?}");
+}

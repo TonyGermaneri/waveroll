@@ -34,6 +34,33 @@ impl Default for Style {
     }
 }
 
+/// Colours for everything drawn over the trace.
+#[derive(Clone, Copy, Debug)]
+pub struct OverlayStyle {
+    /// The lap boundary, where the display wraps.
+    pub lap: [f32; 4],
+    pub bar: [f32; 4],
+    pub cell: [f32; 4],
+    pub selection_fill: [f32; 4],
+    pub selection_edge: [f32; 4],
+    pub head: [f32; 4],
+}
+
+impl Default for OverlayStyle {
+    fn default() -> OverlayStyle {
+        OverlayStyle {
+            lap: [0.55, 0.60, 0.70, 0.55],
+            bar: [0.45, 0.50, 0.60, 0.35],
+            cell: [0.40, 0.45, 0.55, 0.16],
+            // Translucent, because a selection that hid the audio under it would be a strange
+            // thing to make people aim with.
+            selection_fill: [0.98, 0.72, 0.26, 0.20],
+            selection_edge: [1.0, 0.78, 0.32, 0.95],
+            head: [1.0, 0.42, 0.36, 0.95],
+        }
+    }
+}
+
 /// An offscreen colour target, with the padding rules for reading it back.
 pub struct Target {
     texture: wgpu::Texture,
