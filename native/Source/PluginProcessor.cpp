@@ -8,9 +8,26 @@ WaverollProcessor::WaverollProcessor()
 {
 }
 
-void WaverollProcessor::prepareToPlay (double sampleRate, int)
+WaverollProcessor::~WaverollProcessor()
 {
-    snapshot.sampleRate.store (sampleRate);
+    const juce::ScopedLock lock (coreLock);
+    wr_destroy (rustCore);
+    rustCore = nullptr;
+}
+
+void WaverollProcessor::prepareToPlay (double rate, int samplesPerBlock)
+{
+    sampleRate.store (rate);
+    const juce::ScopedLock lock (coreLock);
+    // Re-created rather than reconfigured: the ring's capacity and the tempo map's sample rate are
+    // both fixed at construction, and a rate change means the audio in the old buffer no longer
+    // means what it did.
+    wr_destroy (rustCore);
+    rustCore = wr_create ((uint32_t) rate,
+                          (uint32_t) juce::jlimit (1, 2, getTotalNumInputChannels()),
+                          ringLog2,
+                          (uint32_t) juce::jmax (64, samplesPerBlock));
+
     // Never call setLatencySamples: zero is the right answer and declaring anything makes the host
     // apply delay compensation and shift the track under the user.
 }
@@ -26,26 +43,43 @@ void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
 {
     juce::ScopedNoDenormals noDenormals;
 
-    const bool offline = isNonRealtime();
-    snapshot.offline.store (offline);
+    WrTransport transport {};
+    transport.offline = isNonRealtime();
+    transport.bpm = 120.0;
+    transport.numerator = 4;
+    transport.denominator = 4;
 
-    bool playing = false;
     if (auto* head = getPlayHead())
     {
         if (auto position = head->getPosition())
         {
-            playing = position->getIsPlaying();
+            transport.playing = position->getIsPlaying();
             if (auto bpm = position->getBpm())
-                snapshot.bpm.store (*bpm);
+                transport.bpm = *bpm;
+            if (auto signature = position->getTimeSignature())
+            {
+                transport.numerator = (uint32_t) signature->numerator;
+                transport.denominator = (uint32_t) signature->denominator;
+            }
         }
     }
-    snapshot.playing.store (playing);
 
-    // Capture follows the transport, and refuses an offline render outright. During a bounce the
-    // host calls this far faster than realtime with the transport reporting "playing" the whole
-    // way, so without this guard exporting a track quietly replaces the take with the export.
-    if (playing && ! offline)
-        snapshot.captured.fetch_add (buffer.getNumSamples());
+    // tryEnter rather than enter: the audio thread must never wait on the message thread, and a
+    // block dropped while the core is being rebuilt is a block of audio, not a glitch.
+    const juce::ScopedTryLock lock (coreLock);
+    if (lock.isLocked() && rustCore != nullptr)
+    {
+        const int channels = juce::jlimit (1, 2, buffer.getNumChannels());
+        const float* pointers[2] { nullptr, nullptr };
+        for (int c = 0; c < channels; ++c)
+            pointers[c] = buffer.getReadPointer (c);
+
+        // Capture follows the transport and refuses an offline render, which is enforced inside
+        // the core. During a bounce the host calls this far faster than realtime with the
+        // transport reporting "playing" the whole way, so without that guard exporting a track
+        // quietly replaces the take with the export.
+        wr_capture (rustCore, pointers, (uint32_t) buffer.getNumSamples(), &transport);
+    }
 
     // The buffer is deliberately untouched. In equals out, sample for sample.
     juce::ignoreUnused (buffer);

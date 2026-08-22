@@ -17,6 +17,7 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    bool keyPressed (const juce::KeyPress&) override;
 
     /** The region you drag from. Kept as its own component so the drag begins from a hit test
         rather than from anywhere in the window. */
@@ -39,11 +40,14 @@ private:
     void timerCallback() override;
     /** Writes the file that will be dragged, returning its path. */
     juce::File materialise();
+    static juce::String formatUnit (double bars);
 
     WaverollProcessor& plugin;
     DragSource source { *this };
     juce::Label status;
+    juce::Label hint;
     juce::File staged;
+    bool held = false;
 
     friend class DragSource;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollEditor)

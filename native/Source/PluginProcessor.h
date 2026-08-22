@@ -1,4 +1,6 @@
 #pragma once
+#include <waveroll.h>
+
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -13,7 +15,7 @@ class WaverollProcessor : public juce::AudioProcessor
 {
 public:
     WaverollProcessor();
-    ~WaverollProcessor() override = default;
+    ~WaverollProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -42,17 +44,20 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
-    /** What the last processBlock saw. Read by the editor, written by the audio thread. */
-    struct Snapshot
-    {
-        std::atomic<double> bpm { 120.0 };
-        std::atomic<bool>   playing { false };
-        std::atomic<bool>   offline { false };
-        std::atomic<int64_t> captured { 0 };
-        std::atomic<double> sampleRate { 48000.0 };
-    };
-    Snapshot snapshot;
+    /** The Rust core. Owned here because the audio thread writes into it and the editor comes
+        and goes; an editor-owned core would lose the buffer every time the window closed. */
+    void* core() const noexcept { return rustCore; }
+    double currentSampleRate() const noexcept { return sampleRate.load(); }
 
 private:
+    /** Frames of ring, as a power of two. 2^22 is 87 s at 48 kHz -- comfortably over a 16-bar lap
+        with room to widen the window without reallocating. */
+    static constexpr uint32_t ringLog2 = 22;
+
+    void* rustCore = nullptr;
+    std::atomic<double> sampleRate { 48000.0 };
+    /** Guards the core against being destroyed while processBlock is inside it. */
+    juce::CriticalSection coreLock;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollProcessor)
 };

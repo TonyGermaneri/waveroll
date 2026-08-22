@@ -142,6 +142,14 @@ last true is the point.
 
 ### Results
 
+**Spike 1 — a JUCE plugin drags into Live's arrangement. It works. 22 Aug 2026.**
+`DragAndDropContainer::performExternalDragDropOfFiles`, called synchronously from `mouseDrag`, out
+of a plugin editor loaded in Ableton Live 12.4.1, dropped onto the arrangement. Accepted.
+
+Dragging out of a *plugin* is strictly harder than out of an app, because the editor lives inside
+the host's view hierarchy — so this proves it everywhere, and it is the result the whole
+architecture was waiting on. `auval -v aumf Wvr1 Wvrl` also passes, so Logic will load it.
+
 **Spike 1, browser half — Ableton Live 12 refuses it, 22 Aug 2026.** A page can only put a *file
 promise* on the pasteboard (`DataTransfer` + `DownloadURL`, Chromium only). Live does not accept
 one. This is not a bug to fix: **there is no API by which a web page can hand another application

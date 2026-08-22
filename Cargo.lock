@@ -890,6 +890,13 @@ name = "waveroll-core"
 version = "0.1.0"
 
 [[package]]
+name = "waveroll-ffi"
+version = "0.1.0"
+dependencies = [
+ "waveroll-core",
+]
+
+[[package]]
 name = "waveroll-gpu"
 version = "0.1.0"
 dependencies = [

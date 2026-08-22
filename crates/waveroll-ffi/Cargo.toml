@@ -1,0 +1,12 @@
+[package]
+name = "waveroll-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The C ABI the JUCE shell talks to. No logic of its own."
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+waveroll-core = { path = "../waveroll-core" }
