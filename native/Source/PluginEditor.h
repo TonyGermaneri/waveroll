@@ -65,6 +65,8 @@ private:
     void timerCallback() override;
     juce::File materialise();
     juce::File materialiseMidi();
+    juce::File destination();
+    void send();
     static juce::String formatUnit (double bars);
 
     /**
@@ -103,6 +105,8 @@ private:
     std::unique_ptr<Tiny> fit;
     juce::File staged;
     bool held = false;
+    juce::String notice;
+    juce::uint32 noticeUntil = 0;
 
     friend class Canvas;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollEditor)

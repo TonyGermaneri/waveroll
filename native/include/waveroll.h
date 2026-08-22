@@ -54,8 +54,8 @@ void*    wr_create (uint32_t sample_rate, uint32_t channels, uint32_t capacity_l
 void     wr_destroy (void* core);
 
 /** Real-time safe. Returns frames taken; zero when stopped or rendering offline. */
-uint32_t wr_capture (void* core, const float* const* channels, uint32_t frames,
-                     const WrTransport* transport);
+uint32_t wr_capture (void* core, const float* const* channels, uint32_t channel_count,
+                     uint32_t frames, const WrTransport* transport);
 
 /** Call after wr_capture for the same block. Does nothing when that block was refused. */
 void     wr_capture_midi (void* core, uint32_t offset_in_block,

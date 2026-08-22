@@ -44,6 +44,22 @@ public:
     void getStateInformation (juce::MemoryBlock&) override;
     void setStateInformation (const void*, int) override;
 
+    /**
+     * Things the editor should do, requested from anywhere.
+     *
+     * A bitmask of atomics rather than a queue, because every action here is idempotent within a
+     * frame -- asking twice to send is asking once -- and because the audio thread will be one of
+     * the callers once MIDI bindings exist. Setting a bit is wait-free; doing the work is not, and
+     * belongs on the message thread where files may be written.
+     */
+    enum class Action { Send = 1, Mark = 2, Hold = 4, FromMarker = 8, Downbeat = 16 };
+    void request (Action action) noexcept
+    {
+        pending.fetch_or ((int) action, std::memory_order_release);
+    }
+    /** Takes everything requested since the last call. */
+    int takeRequests() noexcept { return pending.exchange (0, std::memory_order_acquire); }
+
     /** The Rust core. Owned here because the audio thread writes into it and the editor comes
         and goes; an editor-owned core would lose the buffer every time the window closed. */
     void* core() const noexcept { return rustCore; }
@@ -58,6 +74,7 @@ private:
     std::atomic<double> sampleRate { 48000.0 };
     /** Guards the core against being destroyed while processBlock is inside it. */
     juce::CriticalSection coreLock;
+    std::atomic<int> pending { 0 };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (WaverollProcessor)
 };

@@ -45,8 +45,8 @@ WaverollEditor::WaverollEditor (WaverollProcessor& p)
     hint.setJustificationType (juce::Justification::centredRight);
     hint.setColour (juce::Label::textColourId, juce::Colour (0xff4a5262));
     hint.setFont (juce::FontOptions (11.0f));
-    hint.setText ("drag inside to take it  .  1-0 last N x 10%  .  , . grid  .  [ ] window  .  "
-                  "scroll to zoom  .  \\ fit  .  m mark  .  n from mark  .  h hold  .  d downbeat",
+    hint.setText ("drag inside to take it, or s to send  .  1-0 last N x 10%  .  , . grid  .  "
+                  "[ ] window  .  \\ fit  .  m mark  .  n from mark  .  h hold  .  d downbeat",
                   juce::dontSendNotification);
     addAndMakeVisible (hint);
 
@@ -169,6 +169,25 @@ void WaverollEditor::timerCallback()
         if (s.selection_state == 1) text << " (not captured yet)";
         else if (s.selection_state == 2) text << " (overwritten)";
     }
+    // Anything requested from elsewhere -- and, once bindings exist, from a MIDI message on the
+    // audio thread -- is done here, where writing a file is allowed.
+    if (const auto requests = plugin.takeRequests(); requests != 0)
+    {
+        if (requests & (int) WaverollProcessor::Action::Send) send();
+        if (requests & (int) WaverollProcessor::Action::Mark) wr_mark (plugin.core());
+        if (requests & (int) WaverollProcessor::Action::FromMarker) wr_select_from_marker (plugin.core());
+        if (requests & (int) WaverollProcessor::Action::Downbeat) wr_set_downbeat_now (plugin.core());
+        if (requests & (int) WaverollProcessor::Action::Hold)
+        {
+            held = ! held;
+            wr_hold (plugin.core(), held);
+        }
+    }
+
+    if (notice.isNotEmpty() && juce::Time::getMillisecondCounter() < noticeUntil)
+        text = notice;
+    else
+        notice.clear();
     status.setText (text, juce::dontSendNotification);
     grid.value.setText (formatUnit (s.unit_bars) + (s.unit_bars <= 0.0 ? "" : ""),
                         juce::dontSendNotification);
@@ -195,6 +214,7 @@ bool WaverollEditor::keyPressed (const juce::KeyPress& key)
     }
     switch (character)
     {
+        case 's':  send(); return true;
         case 'm':  wr_mark (core); return true;
         case 'n':  wr_select_from_marker (core); return true;
         case 'h':  wr_hold (core, ! held); held = ! held; return true;
@@ -213,6 +233,53 @@ bool WaverollEditor::keyPressed (const juce::KeyPress& key)
         return true;
     }
     return false;
+}
+
+/**
+ * Where takes are written.
+ *
+ * Live's User Library when there is one, because a file there appears in Live's own browser within
+ * moments -- and the browser is navigable from the keyboard, which is the whole point of sending
+ * rather than dragging. Somewhere neutral otherwise.
+ *
+ * Never cleaned up. A host references dropped audio by path until the set is collected, so
+ * deleting a take later breaks somebody's project silently, days after they made it.
+ */
+juce::File WaverollEditor::destination()
+{
+    auto music = juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+    auto library = music.getChildFile ("Ableton/User Library");
+    auto folder = library.isDirectory() ? library.getChildFile ("Samples/Waveroll")
+                                        : music.getChildFile ("Waveroll");
+    folder.createDirectory();
+    return folder;
+}
+
+/**
+ * Writes the selection out without a drag.
+ *
+ * The hands-free half of the tool. Live cannot be told to make a clip -- the Live API has no way
+ * to put an audio file in a clip slot, from Max for Live or anywhere else -- so this puts the file
+ * where Live is already looking and leaves the last step to Live's own keyboard.
+ */
+void WaverollEditor::send()
+{
+    staged = materialise();
+    if (! staged.existsAsFile())
+    {
+        WrStatus s {};
+        if (plugin.core() != nullptr)
+            wr_status (plugin.core(), &s);
+        notice = ! s.has_selection          ? "nothing selected"
+               : s.selection_state == 1     ? "the last cell is not captured yet"
+               : s.selection_state == 2     ? "that selection has been overwritten"
+                                            : "nothing to send";
+        noticeUntil = juce::Time::getMillisecondCounter() + 2500;
+        return;
+    }
+    const auto midi = materialiseMidi();
+    notice = "sent " + staged.getFileName() + (midi.existsAsFile() ? " + .mid" : "");
+    noticeUntil = juce::Time::getMillisecondCounter() + 2500;
 }
 
 juce::String WaverollEditor::formatUnit (double bars)
@@ -255,13 +322,7 @@ juce::File WaverollEditor::materialise()
                           .trimCharactersAtEnd ("0").trimCharactersAtEnd (".").replace (".", "-");
     const auto stem = "waveroll_" + juce::String (juce::roundToInt (s.bpm)) + "bpm_" + bars + "bars";
 
-    // A folder of its own rather than the system temp root, so everything this drops is in one
-    // place a person can find and clear out. Never deleted afterwards: a host references dropped
-    // audio by path until the set is collected, and removing the file breaks the project
-    // silently, days later.
-    auto directory = juce::File::getSpecialLocation (juce::File::userMusicDirectory)
-                         .getChildFile ("Waveroll");
-    directory.createDirectory();
+    auto directory = destination();
     auto file = directory.getNonexistentChildFile (stem, ".wav", false);
     file.replaceWithData (bytes, length);
     return file;

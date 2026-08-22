@@ -6,7 +6,8 @@ license.workspace = true
 description = "The C ABI the JUCE shell talks to. No logic of its own."
 
 [lib]
-crate-type = ["staticlib"]
+# rlib as well as staticlib, so the ABI can be driven from a Rust test rather than only from C++.
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 waveroll-core = { path = "../waveroll-core" }

@@ -174,12 +174,19 @@ pub extern "C" fn wr_destroy(core: *mut c_void) {
 /// Returns how many frames were taken — zero when the transport is stopped or the host is
 /// rendering offline. The buffer is never written to; a tap has no output.
 ///
+/// `channel_count` is the length of `channels` and need not equal the core's own channel count: a
+/// host may hand over fewer planes than the core was configured for, and the last one is
+/// duplicated to fill the rest — the same rule the ring itself uses. A mono buffer into a stereo
+/// core therefore records the take rather than silently recording nothing. A null entry counts as
+/// absent, since that is how a fixed-size C array signals one.
+///
 /// # Safety
-/// `channels` pointers must each be valid for `frames` samples.
+/// `channels` must point to `channel_count` pointers, each valid for `frames` samples.
 #[unsafe(no_mangle)]
 pub extern "C" fn wr_capture(
     core: *mut c_void,
     channels: *const *const f32,
+    channel_count: u32,
     frames: u32,
     transport: *const WrTransport,
 ) -> u32 {
@@ -202,11 +209,21 @@ pub extern "C" fn wr_capture(
         }
         // The planes are pre-sized on the first block and reused, so the audio thread allocates only
         // once per configuration rather than once per block.
+        let mut last: *const f32 = std::ptr::null();
         for (c, plane) in core.planes.iter_mut().enumerate() {
-            let source = unsafe { *channels.add(c) };
+            let mut source = if (c as u32) < channel_count {
+                unsafe { *channels.add(c) }
+            } else {
+                std::ptr::null()
+            };
             if source.is_null() {
+                source = last;
+            }
+            if source.is_null() {
+                // Not one usable plane, and nothing to guess from.
                 return 0;
             }
+            last = source;
             let samples = unsafe { std::slice::from_raw_parts(source, taken) };
             plane.clear();
             plane.extend_from_slice(samples);
@@ -295,6 +312,7 @@ pub extern "C" fn wr_capture_midi(
 pub extern "C" fn wr_stage_midi(core: *mut c_void, let_ring: bool) -> usize {
     guard(0, || {
         let core = core_ref!(core, 0);
+        settle(core);
         core.staged_midi.clear();
         let Some(selection) = core.selection else { return 0 };
         let staged = smf::stage(&core.midi, selection, let_ring);
@@ -480,6 +498,9 @@ pub extern "C" fn wr_set_downbeat_now(core: *mut c_void) {
 pub extern "C" fn wr_stage(core: *mut c_void, time_reference: u64) -> usize {
     guard(0, || {
         let core = core_ref!(core, 0);
+        // The same trimming the editor sees, so what is written is what was on screen. Without it,
+        // staging before any status call would export a selection erosion had already taken from.
+        settle(core);
         core.staged.clear();
         let Some(selection) = core.selection else { return 0 };
         if !core.reader.holds(selection.start, selection.end) {

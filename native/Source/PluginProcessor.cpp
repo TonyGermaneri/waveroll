@@ -78,8 +78,8 @@ void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
         // the core. During a bounce the host calls this far faster than realtime with the
         // transport reporting "playing" the whole way, so without that guard exporting a track
         // quietly replaces the take with the export.
-        const auto taken = wr_capture (rustCore, pointers, (uint32_t) buffer.getNumSamples(),
-                                       &transport);
+        const auto taken = wr_capture (rustCore, pointers, (uint32_t) channels,
+                                       (uint32_t) buffer.getNumSamples(), &transport);
 
         // After the audio, so the events land on the same axis. The core refuses them when the
         // block was refused, which keeps a clip from containing notes whose audio was never
