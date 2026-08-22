@@ -100,10 +100,12 @@
     <p style="color:var(--ink-3)">drag to select · click for one cell · <code>1-0</code> last N×10%
       · <code>\</code> fit · wheel to zoom · <code>space</code> run · <code>d</code> set downbeat<br>
       <code>h</code> hold · <code>m</code> mark · <code>n</code> select from last mark</p>
-    <p><b style="color:var(--ink)">To take it: drag from inside the selection.</b>
-      <span style="color:var(--ink-3)">Dragging anywhere else makes a new selection, and
-      <code>alt</code> forces one even over the old. <code>c</code> stages without dragging, for
-      the download link.</span></p>
+    <p><b style="color:var(--ink)">To take it: press <code>c</code>, then drag the file from your
+      browser downloads.</b>
+      <span style="color:var(--ink-3)">Dragging straight from the selection works into Finder but
+      <em>not</em> into Ableton: a web page can only offer a file promise, never a path, and no API
+      changes that. The desktop build hands over a real path and drags in one gesture. Dragging
+      outside the selection makes a new one; <code>alt</code> forces one even over the old.</span></p>
     <p style="margin-top:20px"><select id="device" style="max-width:34ch"><option value="">Default input</option></select></p>
     <button id="begin">Use my input</button>
     <button id="demo" style="margin-left:8px">Demo signal</button>

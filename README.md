@@ -119,7 +119,7 @@ truncates every shader to an empty module, which then validates perfectly. The s
 Three questions cannot be answered from a terminal. They gate phases 8 and 9, not phase 1, so the
 core is being built in parallel; none of its behaviour depends on how they come out.
 
-**1. Drag out of a plugin editor** — needs you. A stock JUCE plugin with one button calling
+**1. Drag out of a plugin editor** — needs you. *The browser half is answered, below.* A stock JUCE plugin with one button calling
 `performExternalDragDropOfFiles` on a four-bar WAV, loaded into Live and Logic, dragged into the
 host's own arrangement. Dragging out of a plugin is strictly harder than out of an app, so proving
 it there proves it everywhere. Then fire the same call from a callback invoked *synchronously*
@@ -141,6 +141,21 @@ Record the results here, with host versions and dates. They will rot, and knowin
 last true is the point.
 
 ### Results
+
+**Spike 1, browser half — Ableton Live 12 refuses it, 22 Aug 2026.** A page can only put a *file
+promise* on the pasteboard (`DataTransfer` + `DownloadURL`, Chromium only). Live does not accept
+one. This is not a bug to fix: **there is no API by which a web page can hand another application
+a file path**, so no amount of work on the web build changes it.
+
+What that settles:
+
+* **The JUCE build is the product, and the web build is a shop window.** It captures, displays,
+  quantises, selects and writes a correct WAV — everything except the last six inches.
+* The practical workflow on the web is **stage, download, then drag from the browser's own
+  downloads UI**, which does hand over a real path. Two gestures instead of one. The page now says
+  so rather than offering a drag that silently fails.
+* `performExternalDragDropOfFiles` from JUCE hands over a real path and is the thing still to be
+  measured — that is the other half of Spike 1, and it is the one that matters.
 
 **Spike 2 — Ableton Live 12 Suite over IAC, 21 Aug 2026.** Live at exactly 120 BPM, 14,010 ticks
 over 291.9 s, 0 dropped. Trace checked in as `tests/traces/live12-120.txt`.

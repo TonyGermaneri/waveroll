@@ -452,7 +452,7 @@ window.addEventListener('keydown', (event) => {
     case '\\': wr.home(); break;
     case ' ': toggleRun(); event.preventDefault(); break;
     case 'd': wr.set_downbeat_now(); note('downbeat set'); break;
-    case 'c': case 'Enter': flash('c'); stage(); break;
+    case 'c': case 'Enter': flash('c'); if (stage()) download(); break;
     case 'h': toggleHold(); break;
     case 'm': state.wr.mark(); note('marked'); break;
     case 'n': if (!state.wr.select_from_marker()) note('no marker behind the head'); break;
@@ -518,6 +518,23 @@ function stage() {
   return true;
 }
 
+/**
+ * Downloads the staged file.
+ *
+ * Measured against Ableton Live 12: it does not accept the drag. A page can only put a file
+ * *promise* on the pasteboard, never a path, and there is no web API that changes that — so on
+ * the web this is the reliable route. Chromium's own downloads UI *does* hand over a real path,
+ * which makes the working sequence stage, download, drag from there.
+ */
+function download() {
+  if (!state.staged) return;
+  const link = document.createElement('a');
+  link.href = state.staged.url;
+  link.download = state.staged.name;
+  link.click();
+  note('downloaded — drag it from your browser downloads into the DAW');
+}
+
 $('chip').addEventListener('dragstart', (event) => {
   if (!state.staged) return;
   const { name, url } = state.staged;
@@ -563,6 +580,11 @@ function note(text) {
 $('run').addEventListener('click', toggleRun);
 $('hold').addEventListener('click', toggleHold);
 $('discard').addEventListener('click', discard);
+$('chip').addEventListener('click', (event) => {
+  // The anchor's own download would fire anyway; this only keeps the message consistent.
+  event.preventDefault();
+  download();
+});
 $('midi').addEventListener('click', () => enableMidi().catch((e) => note(String(e))));
 
 async function begin(demo) {
