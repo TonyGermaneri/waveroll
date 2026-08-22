@@ -237,23 +237,20 @@ impl WaveformPass {
     pub fn draw(
         &self,
         gpu: &Gpu,
-        target: &Target,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
         envelope: &wgpu::Buffer,
         columns: u32,
         style: &Style,
     ) {
+        let (width, height) = size;
         let mut bytes = Vec::with_capacity(96);
         let mut push = |v: [f32; 4]| {
             for f in v {
                 bytes.extend_from_slice(&f.to_le_bytes());
             }
         };
-        push([
-            target.width as f32,
-            target.height as f32,
-            1.0 / target.width as f32,
-            1.0 / target.height as f32,
-        ]);
+        push([width as f32, height as f32, 1.0 / width as f32, 1.0 / height as f32]);
         push(style.peak);
         push(style.rms);
         push(style.unwritten);
@@ -276,7 +273,7 @@ impl WaveformPass {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("waveform"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {

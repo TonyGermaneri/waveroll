@@ -71,6 +71,10 @@ impl CaptureClock {
     }
 
     pub fn map(&self) -> &TempoMap { &self.map }
+
+    /// Mutable access, for the one thing that legitimately reaches in from outside: placing the
+    /// downbeat by hand. Everything else about the map is derived from the transport.
+    pub fn map_mut(&mut self) -> &mut TempoMap { &mut self.map }
     /// Frames captured so far. This is the ring's absolute frame index, and the grid's x-axis.
     pub fn captured(&self) -> u64 { self.captured }
     pub fn is_playing(&self) -> bool { self.playing }

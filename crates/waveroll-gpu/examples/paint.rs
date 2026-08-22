@@ -82,7 +82,7 @@ fn main() {
     let view = View::new(16.0);
     let viewport = Viewport::resolve(&view, &map, written, W);
     envelope.reduce(&gpu, &mirror, &viewport, &map, [1.0, 0.0]);
-    waveform.draw(&gpu, &target, envelope.output(), W, &Style::default());
+    waveform.draw(&gpu, &target.view, (W, H), envelope.output(), W, &Style::default());
 
     // Auto quantise, at the zoom the view is actually at.
     let unit = Unit::Auto.bars(viewport.span_bars, f64::from(W));
@@ -96,7 +96,7 @@ fn main() {
 
     let style = OverlayStyle::default();
     let mut overlay = Overlay::default();
-    overlay.begin(&target);
+    overlay.begin((W, H));
     overlay.grid(&rulings, &style);
     overlay.selection(
         viewport.fraction_at(map.bars_at(selection.start)),
@@ -104,7 +104,7 @@ fn main() {
         &style,
     );
     overlay.head(viewport.head_fraction(), &style);
-    overlay_pass.draw(&gpu, &target, &overlay);
+    overlay_pass.draw(&gpu, &target.view, (W, H), &overlay);
 
     let pixels = target.read(&gpu);
     let mut bytes = Vec::with_capacity(pixels.len() * 4);

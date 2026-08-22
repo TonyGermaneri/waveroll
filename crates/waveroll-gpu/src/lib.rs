@@ -8,6 +8,10 @@
 //! The shaders in `src/shaders/` are vendored from waveshape essentially unchanged, because WGSL
 //! is `wgpu`'s own shading language and they already targeted WebGPU.
 
+/// Re-exported so dependents cannot end up linking a second, incompatible wgpu. Two versions in
+/// one binary compile perfectly and then fail at the first type that crosses between them.
+pub use wgpu;
+
 pub mod device;
 pub mod envelope;
 pub mod fft;

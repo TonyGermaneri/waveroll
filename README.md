@@ -47,10 +47,16 @@ is the property that lets one implementation serve the browser, the standalone a
 and it is checked in CI rather than assumed.
 
 ```
-cargo test --workspace
-cargo clippy --workspace --all-targets
-cargo build --target wasm32-unknown-unknown -p waveroll-core
+cargo test                                              # the native crates
+cargo clippy --all-targets
+cargo clippy -p waveroll-wasm --target wasm32-unknown-unknown
+wasm-pack build --target web --dev --out-dir ../../web/pkg crates/waveroll-wasm
+python3 web/serve.py                                    # then open localhost:8788/?demo
 ```
+
+**Not `--workspace`.** `waveroll-wasm` only compiles for `wasm32` — `SurfaceTarget::Canvas` is
+`cfg(web)` — so it is excluded via `default-members`, and `--workspace` overrides that and fails
+the build. Plain `cargo test` is what CI runs.
 
 ## Verification
 

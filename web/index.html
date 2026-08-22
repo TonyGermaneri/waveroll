@@ -1,0 +1,88 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waveroll</title>
+<style>
+  :root {
+    --ground: #0b0e13; --panel: #141922; --rule: #262e3a;
+    --ink: #e7eaf0; --ink-2: #97a1b2; --ink-3: #6b7484;
+    --accent: #f0b342; --live: #5cc28c; --idle: #6b7484;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--ground); color: var(--ink);
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: hidden; }
+  #stage { position: fixed; inset: 0 0 34px 0; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+  /* The hidden parameters the brief asks for: the number row and copy, visible so they can be
+     MIDI-bound, since a control you cannot see is a control you cannot learn. */
+  #bindables { position: fixed; left: 0; right: 0; bottom: 34px; display: flex; gap: 1px;
+    padding: 0 8px 6px; pointer-events: none; }
+  #bindables span { flex: 1; text-align: center; padding: 2px 0; font-size: 10px;
+    color: var(--ink-3); background: #0f141b; border: 1px solid var(--rule); border-radius: 2px; }
+  #bindables span.hit { color: var(--ground); background: var(--accent); border-color: var(--accent); }
+
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 34px; display: flex;
+    align-items: center; gap: 14px; padding: 0 12px; background: var(--panel);
+    border-top: 1px solid var(--rule); white-space: nowrap; overflow-x: auto; }
+  #bar b { color: var(--ink-3); font-weight: 400; letter-spacing: .08em; text-transform: uppercase;
+    font-size: 10px; margin-right: 4px; }
+  #bar span { font-variant-numeric: tabular-nums; }
+  button, select { font: inherit; background: #1d232d; color: var(--ink); border: 1px solid #39424f;
+    border-radius: 3px; padding: 3px 9px; cursor: pointer; }
+  button:hover { border-color: #5a6474; }
+  button[data-on="1"] { background: var(--live); border-color: var(--live); color: #06110b; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); display: inline-block; }
+  .dot[data-on="1"] { background: var(--live); }
+
+  #boot { position: fixed; inset: 0; display: grid; place-items: center; background: var(--ground);
+    text-align: center; padding: 24px; }
+  #boot div { max-width: 62ch; color: var(--ink-2); line-height: 1.7; }
+  #boot h1 { font-size: 13px; letter-spacing: .2em; text-transform: uppercase; color: var(--ink-3);
+    margin: 0 0 18px; }
+  #boot code { color: var(--accent); }
+  #boot button { margin-top: 20px; padding: 8px 22px; }
+</style>
+
+<div id="stage"><canvas id="canvas"></canvas></div>
+
+<div id="bindables">
+  <span data-key="1">10%</span><span data-key="2">20%</span><span data-key="3">30%</span>
+  <span data-key="4">40%</span><span data-key="5">50%</span><span data-key="6">60%</span>
+  <span data-key="7">70%</span><span data-key="8">80%</span><span data-key="9">90%</span>
+  <span data-key="0">100%</span><span data-key="c">copy</span>
+</div>
+
+<div id="bar">
+  <span><i class="dot" id="cap-dot"></i> <b>capture</b><span id="cap">idle</span></span>
+  <span><b>clock</b><span id="clock">internal</span></span>
+  <span><b>bpm</b><span id="bpm">120.00</span></span>
+  <span><b>bar</b><span id="pos">1.00</span></span>
+  <span><b>lap</b><span id="lap">0</span></span>
+  <span><b>grid</b><span id="unit">auto</span></span>
+  <span><b>window</b><span id="window">16</span></span>
+  <span><b>sel</b><span id="sel">—</span></span>
+  <span><b>tempo</b><input id="bpmIn" type="number" value="120" min="20" max="300" step="0.01"
+    style="width:74px;font:inherit;background:#1d232d;color:var(--ink);border:1px solid #39424f;
+    border-radius:3px;padding:2px 4px"></span>
+  <button id="run">Run</button>
+  <button id="midi">Enable MIDI</button>
+  <span id="adapter" style="color:var(--ink-3);margin-left:auto"></span>
+</div>
+
+<div id="boot">
+  <div>
+    <h1>Waveroll</h1>
+    <p>A rolling sampler. It keeps the last sixteen bars of whatever it hears and lets you select a
+      bar-quantised region of it. It makes no sound of its own.</p>
+    <p>Needs a microphone or interface, and WebGPU. <code>Run</code> starts the internal transport;
+      capture follows the transport, so nothing is recorded until something says it is playing.
+      Enable MIDI and a DAW's clock takes over.</p>
+    <p style="color:var(--ink-3)">drag to select · click for one cell · <code>1-0</code> last N×10%
+      · <code>\</code> fit · wheel to zoom · <code>space</code> run · <code>d</code> set downbeat</p>
+    <button id="begin">Use my input</button>
+    <button id="demo" style="margin-left:8px">Demo signal</button>
+  </div>
+</div>
+
+<script type="module" src="./src/main.js"></script>

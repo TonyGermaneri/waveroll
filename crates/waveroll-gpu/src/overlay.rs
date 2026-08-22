@@ -3,7 +3,7 @@
 use waveroll_core::grid::{Rule, Ruling};
 
 use crate::device::Gpu;
-use crate::render::{OverlayStyle, Target};
+use crate::render::OverlayStyle;
 
 /// A list of rectangles in pixel space, built each frame and uploaded in one go.
 #[derive(Default)]
@@ -15,11 +15,11 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn begin(&mut self, target: &Target) {
+    pub fn begin(&mut self, size: (u32, u32)) {
         self.rects.clear();
         self.count = 0;
-        self.width = target.width as f32;
-        self.height = target.height as f32;
+        self.width = size.0 as f32;
+        self.height = size.1 as f32;
     }
 
     pub fn len(&self) -> u32 {
@@ -174,18 +174,20 @@ impl OverlayPass {
 
     /// Draws over whatever is already in the target — the trace, which is why this loads rather
     /// than clears.
-    pub fn draw(&self, gpu: &Gpu, target: &Target, overlay: &Overlay) {
+    pub fn draw(
+        &self,
+        gpu: &Gpu,
+        view: &wgpu::TextureView,
+        size: (u32, u32),
+        overlay: &Overlay,
+    ) {
         let count = overlay.count.min(self.capacity);
         if count == 0 {
             return;
         }
+        let (width, height) = size;
         let mut bytes = Vec::with_capacity(16);
-        for f in [
-            target.width as f32,
-            target.height as f32,
-            1.0 / target.width as f32,
-            1.0 / target.height as f32,
-        ] {
+        for f in [width as f32, height as f32, 1.0 / width as f32, 1.0 / height as f32] {
             bytes.extend_from_slice(&f.to_le_bytes());
         }
         gpu.queue.write_buffer(&self.uniform, 0, &bytes);
@@ -212,7 +214,7 @@ impl OverlayPass {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("overlay"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target.view,
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {

@@ -44,34 +44,45 @@ pub fn block_on<F: Future>(future: F) -> F::Output {
 pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
+    /// Kept because surface capabilities are asked of the adapter, not the device, and a caller
+    /// that has one of these should not have to have held on to the other.
+    pub adapter: wgpu::Adapter,
     pub info: wgpu::AdapterInfo,
 }
 
 impl Gpu {
-    /// Opens a device with no surface attached.
+    /// Opens a device, optionally one able to present to `surface`.
     ///
-    /// Headless, because the analysis chain has nothing to do with a window: it is validated in
-    /// CI, it runs in a plugin editor whose surface belongs to the host, and it runs in a worker
-    /// under wasm. A renderer that could only be built around a window would be untestable.
-    pub fn headless() -> Result<Gpu, String> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
-        let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            force_fallback_adapter: false,
-            compatible_surface: None,
-        }))
-        .map_err(|e| format!("no GPU adapter: {e}"))?;
+    /// Async because it has to be: under wasm there is no thread to block, and the same call has
+    /// to serve the browser, the plugin editor whose surface belongs to the host, and CI with no
+    /// surface at all. [`Gpu::headless`] is the blocking convenience for the last of those.
+    pub async fn open(
+        instance: &wgpu::Instance,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Gpu, String> {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface,
+            })
+            .await
+            .map_err(|e| format!("no GPU adapter: {e}"))?;
         let info = adapter.get_info();
 
-        let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("waveroll"),
-            // Nothing here needs an optional feature. Asking for none keeps the same code path on
-            // WebGPU, where most of them do not exist.
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            ..Default::default()
-        }))
-        .map_err(|e| format!("no GPU device: {e}"))?;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("waveroll"),
+                // Nothing here needs an optional feature. Asking for none keeps the same code path
+                // on WebGPU, where most of them do not exist.
+                required_features: wgpu::Features::empty(),
+                // downlevel_defaults rather than the adapter's own limits, so a shader that only
+                // works on a generous desktop GPU fails here rather than in a browser.
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("no GPU device: {e}"))?;
 
         // A validation error inside a compute pass is otherwise reported by wgpu and then ignored,
         // which turns "the shader did not run" into "the output buffer is still zeros" — a wrong
@@ -80,7 +91,14 @@ impl Gpu {
             panic!("wgpu validation error: {error}");
         }));
 
-        Ok(Gpu { device, queue, info })
+        Ok(Gpu { device, queue, adapter, info })
+    }
+
+    /// Opens a device with no surface attached, blocking until it is ready. Native only — under
+    /// wasm there is no thread to block and [`Gpu::open`] must be awaited instead.
+    pub fn headless() -> Result<Gpu, String> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        block_on(Gpu::open(&instance, None))
     }
 
     pub fn describe(&self) -> String {

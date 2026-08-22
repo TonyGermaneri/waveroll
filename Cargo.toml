@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["crates/waveroll-core", "crates/waveroll-gpu"]
+members = ["crates/waveroll-core", "crates/waveroll-gpu", "crates/waveroll-wasm"]
+# waveroll-wasm only compiles for wasm32 — SurfaceTarget::Canvas is cfg(web) — so it is kept out
+# of the default build. `cargo test` at the root therefore means the native crates, and the wasm
+# one is built explicitly with --target wasm32-unknown-unknown.
+default-members = ["crates/waveroll-core", "crates/waveroll-gpu"]
 
 [workspace.package]
 version = "0.1.0"

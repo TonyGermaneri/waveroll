@@ -190,19 +190,19 @@ impl EnvelopePass {
         }
     }
 
-    /// Reduces the mirror into one value per column and reads the result back.
+    /// Reduces the mirror into one value per column, leaving the result on the GPU.
     ///
-    /// Reading back is for tests and for anything the CPU has to answer questions about. The render
-    /// path leaves the result on the GPU and draws from it directly — a readback there would stall
-    /// the pipeline once per frame for data the CPU never looks at.
-    pub fn reduce(
+    /// Returns how many columns were written. This is what the render path calls: the result is
+    /// drawn from directly, and a readback here would stall the pipeline once per frame for data
+    /// the CPU never looks at.
+    pub fn dispatch(
         &mut self,
         gpu: &Gpu,
         mirror: &RingMirror,
         viewport: &Viewport,
         map: &TempoMap,
         mix: [f32; 2],
-    ) -> Vec<Envelope> {
+    ) -> u32 {
         let mut columns = Vec::new();
         viewport.columns(map, &mut columns);
         let count = (columns.len() as u32).min(self.capacity_columns);
@@ -241,6 +241,27 @@ impl EnvelopePass {
             // One workgroup per column, not one thread: each column reduces its own span.
             pass.dispatch_workgroups(count, 1, 1);
         }
+        gpu.queue.submit([encoder.finish()]);
+        count
+    }
+
+    /// Reduces and then reads the result back, for tests and for anything the CPU has to answer
+    /// questions about.
+    pub fn reduce(
+        &mut self,
+        gpu: &Gpu,
+        mirror: &RingMirror,
+        viewport: &Viewport,
+        map: &TempoMap,
+        mix: [f32; 2],
+    ) -> Vec<Envelope> {
+        let count = self.dispatch(gpu, mirror, viewport, map, mix);
+        if count == 0 {
+            return Vec::new();
+        }
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
         encoder.copy_buffer_to_buffer(&self.output, 0, &self.readback, 0, u64::from(count) * 16);
         gpu.queue.submit([encoder.finish()]);
 

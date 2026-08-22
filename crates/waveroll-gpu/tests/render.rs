@@ -62,7 +62,7 @@ fn paint(gpu: &Gpu, amplitude: f32, bars: f64, style: &Style) -> Vec<[u8; 4]> {
 
     let viewport = Viewport::resolve(&View::new(16.0), &map, frames as u64, W);
     envelope.reduce(gpu, &mirror, &viewport, &map, [1.0, 0.0]);
-    waveform.draw(gpu, &target, envelope.output(), W, style);
+    waveform.draw(gpu, &target.view, (W, H), envelope.output(), W, style);
     target.read(gpu)
 }
 
@@ -174,12 +174,12 @@ fn paint_overlay(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    waveform.draw(gpu, &target, &empty, 0, &style);
+    waveform.draw(gpu, &target.view, (W, H), &empty, 0, &style);
 
     let mut overlay = Overlay::default();
-    overlay.begin(&target);
+    overlay.begin((W, H));
     build(&mut overlay, &overlay_style);
-    pass.draw(gpu, &target, &overlay);
+    pass.draw(gpu, &target.view, (W, H), &overlay);
     (target.read(gpu), overlay_style)
 }
 
