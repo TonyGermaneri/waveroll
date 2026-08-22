@@ -61,6 +61,8 @@ pub struct WavSpec {
 }
 
 impl WavSpec {
+    /// Dither is on for 16-bit and off otherwise — see [`WavSpec::dither`] for why that is the
+    /// default rather than a preference.
     pub fn new(sample_rate: u32, depth: Depth) -> WavSpec {
         WavSpec {
             sample_rate,

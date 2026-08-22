@@ -108,6 +108,11 @@ pub struct Viewport {
 }
 
 impl Viewport {
+    /// Resolves the view against the clock, for one painted frame.
+    ///
+    /// `captured` is the head the display works from, which is the frozen one while holding rather
+    /// than the ring's own — everything downstream reads the viewport, so freezing it here is what
+    /// makes hold freeze the whole picture.
     pub fn resolve(view: &View, map: &TempoMap, captured: u64, columns: u32) -> Viewport {
         let mut view = *view;
         view.clamp();

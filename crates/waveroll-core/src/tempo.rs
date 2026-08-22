@@ -27,6 +27,9 @@ pub struct Meter {
 impl Meter {
     pub const FOUR_FOUR: Meter = Meter { num: 4, den: 4 };
 
+    /// # Panics
+    /// If either part is zero. A meter with no beats is not a meter that got the wrong answer, it
+    /// is a caller with a bug, and every downstream division would produce infinities from it.
     pub fn new(num: u32, den: u32) -> Meter {
         assert!(num > 0 && den > 0, "a meter needs a non-zero numerator and denominator");
         Meter { num, den }
@@ -202,6 +205,8 @@ impl TempoMap {
 
     /// Number of segments. Only useful for asserting that a clock is not appending noise.
     pub fn len(&self) -> usize { self.entries.len() }
+    /// Always false. A map is constructed with its first segment and segments are only ever
+    /// appended, so there is no state in which it has nothing to say. It exists because `len` does.
     pub fn is_empty(&self) -> bool { false }
 }
 

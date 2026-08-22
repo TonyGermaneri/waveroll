@@ -529,6 +529,10 @@ impl Staged {
         Clip { notes: &self.notes, controls: &self.controls, bends: &self.bends }
     }
 
+    /// Nothing was played over the selection at all — no notes, no controllers, no bend.
+    ///
+    /// Worth asking before writing a file: a host handed a MIDI clip with nothing in it still
+    /// makes a track for it, and a silent track nobody asked for is worse than one fewer file.
     pub fn is_empty(&self) -> bool {
         self.notes.is_empty() && self.controls.is_empty() && self.bends.is_empty()
     }

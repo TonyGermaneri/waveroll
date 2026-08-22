@@ -32,6 +32,7 @@ impl Event {
     pub fn is_note_on(&self) -> bool {
         self.kind() == 0x90 && self.data2 > 0
     }
+    /// The other half of the same rule: `0x80`, or `0x90` with velocity zero.
     pub fn is_note_off(&self) -> bool {
         self.kind() == 0x80 || (self.kind() == 0x90 && self.data2 == 0)
     }
@@ -83,6 +84,8 @@ impl MidiRing {
     pub fn capacity(&self) -> usize {
         self.events.len()
     }
+    /// Events ever pushed, not events held. Monotonic, and larger than the capacity once the
+    /// ring has wrapped — which is how a consumer can tell that it has.
     pub fn written(&self) -> u64 {
         self.write
     }

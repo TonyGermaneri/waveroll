@@ -175,6 +175,10 @@ impl Reader {
         diff as usize
     }
 
+    /// Moves this reader's cursor forward.
+    ///
+    /// Not checked against the head: a cursor past it simply reports nothing available until the
+    /// writer catches up, which is the same thing a fresh reader does and needs no special case.
     pub fn advance(&mut self, frames: usize) {
         self.cursor += frames as u64;
     }
