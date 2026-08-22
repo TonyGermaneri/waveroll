@@ -323,13 +323,15 @@ impl Waveroll {
     pub fn select_percent(&mut self, tenths: u32) {
         let viewport = self.viewport();
         let unit = self.unit_bars(&viewport);
-        self.selection = Some(grid::percent_from_head(
+        if let Some(selection) = grid::percent_from_head(
             self.clock.map(),
             unit,
-            self.clock.captured(),
+            self.head(),
             self.view.window_bars,
             tenths,
-        ));
+        ) {
+            self.selection = Some(selection);
+        }
     }
 
     pub fn clear_selection(&mut self) {

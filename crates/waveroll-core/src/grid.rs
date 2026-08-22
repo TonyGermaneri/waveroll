@@ -171,30 +171,43 @@ pub fn snap_range_upto(
 
 /// The number row: the most recent `tenths`/10 of the window, ending at the write head.
 ///
-/// Head to tail, snapped outward, clamped to the window. `tenths` is 1..=10, with the `0` key
-/// meaning ten. At the 16-bar default this yields 2, 4, 5, 7, 8, 10, 12, 13, 15 and 16 bars — the
-/// tidy landings are the quarters, and the rest are what falling on a grid actually costs.
+/// Head to tail: the most recent `tenths`/10 of the window, as a whole number of cells.
+///
+/// **Both ends snap.** An earlier version ended exactly at the write head, on the reasoning that
+/// the head is a fact rather than a preference. That is true and it produced 3.27-bar files, which
+/// will not loop — and loops are the entire output of this tool. Ending at the last *complete*
+/// cell gives up at most a fraction of a bar of the newest audio and always yields something that
+/// can be dropped on a bar line. Hold exists for when that fraction matters.
+///
+/// `tenths` is 1..=10, with the `0` key meaning ten. Returns `None` when not one whole cell has
+/// been captured yet.
 pub fn percent_from_head(
     map: &TempoMap,
     unit_bars: f64,
     head: u64,
     window_bars: f64,
     tenths: u32,
-) -> Selection {
+) -> Option<Selection> {
     let unit = guard_unit(unit_bars);
     let tenths = tenths.clamp(1, 10) as f64;
     let head_bars = map.bars_at(head);
     let window_start = (head_bars - window_bars).max(0.0);
     let wanted = window_bars * tenths / 10.0;
 
-    // Snap the moving edge outward and leave the head where it is: the head is a fact, not a
-    // preference, and rounding it would select audio that has not been captured yet.
-    let start_bars = ((head_bars - wanted) / unit).floor() * unit;
-    let start_bars = start_bars.max(window_start);
-    Selection {
-        start: map.frame_at_bars(start_bars),
-        end: head,
+    let end_bars = (head_bars / unit).floor() * unit;
+    // How many whole cells the request comes to, at least one.
+    let cells = (wanted / unit).round().max(1.0);
+    let start_bars = (end_bars - cells * unit).max(window_start);
+    // Re-align the start after clamping, so a request that ran off the front of the window is
+    // still a whole number of cells rather than a ragged one.
+    let start_bars = (start_bars / unit).ceil() * unit;
+    if end_bars <= start_bars {
+        return None;
     }
+    Some(Selection {
+        start: map.frame_at_bars(start_bars),
+        end: map.frame_at_bars(end_bars),
+    })
 }
 
 fn guard_unit(unit_bars: f64) -> f64 {
@@ -374,18 +387,38 @@ mod tests {
     }
 
     #[test]
-    fn the_number_row_at_sixteen_bars_lands_where_the_plan_says() {
+    fn the_number_row_rounds_to_whole_cells() {
         let map = flat();
-        let head = map.frame_at_bars(64.0); // well into the session
-        let expected = [2.0, 4.0, 5.0, 7.0, 8.0, 10.0, 12.0, 13.0, 15.0, 16.0];
+        let head = map.frame_at_bars(64.0); // on a bar line
+        let expected = [2.0, 3.0, 5.0, 6.0, 8.0, 10.0, 11.0, 13.0, 14.0, 16.0];
         for (i, want) in expected.iter().enumerate() {
-            let sel = percent_from_head(&map, 1.0, head, 16.0, i as u32 + 1);
+            let sel = percent_from_head(&map, 1.0, head, 16.0, i as u32 + 1).expect("whole cells");
             let bars = map.bars_at(sel.end) - map.bars_at(sel.start);
             assert!(
                 (bars - want).abs() < 1e-6,
                 "key {} selected {bars} bars, expected {want}",
                 (i + 1) % 10
             );
+        }
+    }
+
+    #[test]
+    fn the_number_row_gives_a_loopable_length_from_anywhere() {
+        // The head is almost never on a grid line, and this is the property that matters: whatever
+        // it comes out as, it has to be a whole number of cells or it will not loop.
+        let map = flat();
+        let mut rng = Lcg(0x10AD);
+        for _ in 0..2000 {
+            let head = map.frame_at_bars(20.0) + rng.below(48_000 * 90);
+            let unit = LADDER[rng.below(LADDER.len() as u64) as usize];
+            let tenths = 1 + rng.below(10) as u32;
+            let Some(sel) = percent_from_head(&map, unit, head, 16.0, tenths) else { continue };
+            let cells = (map.bars_at(sel.end) - map.bars_at(sel.start)) / unit;
+            assert!(
+                (cells - cells.round()).abs() < 1e-6 && cells.round() >= 1.0,
+                "unit {unit}, key {tenths}: {cells} cells is not a loop"
+            );
+            assert!(sel.end <= head, "it may not reach past the head");
         }
     }
 
@@ -398,9 +431,9 @@ mod tests {
             let window = 4.0 + (rng.below(6000) as f64) / 100.0;
             let unit = LADDER[rng.below(LADDER.len() as u64) as usize];
             let tenths = 1 + rng.below(10) as u32;
-            let sel = percent_from_head(&map, unit, head, window, tenths);
-            assert_eq!(sel.end, head, "the head is a fact and must not be rounded");
-            assert!(sel.start <= head);
+            let Some(sel) = percent_from_head(&map, unit, head, window, tenths) else { continue };
+            assert!(sel.end <= head, "it may not reach past the head");
+            assert!(sel.start <= sel.end);
             let span = map.bars_at(sel.end) - map.bars_at(sel.start);
             assert!(
                 span <= window + 1e-6,
@@ -413,11 +446,11 @@ mod tests {
     fn zero_and_ten_both_mean_the_whole_window() {
         let map = flat();
         let head = map.frame_at_bars(40.0);
-        let all = percent_from_head(&map, 1.0, head, 16.0, 10);
+        let all = percent_from_head(&map, 1.0, head, 16.0, 10).expect("the whole window");
         assert!((map.bars_at(all.end) - map.bars_at(all.start) - 16.0).abs() < 1e-6);
         // Out-of-range keys clamp rather than producing nonsense.
         assert_eq!(percent_from_head(&map, 1.0, head, 16.0, 0), percent_from_head(&map, 1.0, head, 16.0, 1));
-        assert_eq!(percent_from_head(&map, 1.0, head, 16.0, 99), all);
+        assert_eq!(percent_from_head(&map, 1.0, head, 16.0, 99), Some(all));
     }
 }
 

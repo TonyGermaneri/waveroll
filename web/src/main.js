@@ -31,6 +31,7 @@ const state = {
   unitBars: 0, // 0 = auto
   demo: null,
   staged: null,
+  status: null,
 };
 
 // ---------------------------------------------------------------------------------------
@@ -266,6 +267,7 @@ function frame() {
 }
 
 function paintStatus(s) {
+  state.status = s;
   $('cap').textContent = s.held ? 'frozen' : s.playing ? 'capturing' : 'stopped';
   $('marks').textContent = s.markers;
   $('cap-dot').dataset.on = s.playing ? '1' : '0';
@@ -307,12 +309,100 @@ const fractionOf = (event) => {
   return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
 };
 
+/**
+ * Whether the pointer is over the current selection.
+ *
+ * This is what separates grabbing from selecting, and it is the same rule every file manager and
+ * arrangement view already uses: a drag that starts *inside* a selection carries it, a drag
+ * anywhere else starts a new one. Holding alt forces a new selection, for the case where the thing
+ * you want to select is underneath the thing you already selected.
+ */
+function overSelection(event) {
+  const selection = state.status?.selection;
+  if (!selection || state.status.state !== 'ready') return false;
+  const at = fractionOf(event);
+  return at >= Math.min(selection.from, selection.to) && at <= Math.max(selection.from, selection.to);
+}
+
+/**
+ * Native drag can only be started from a real `dragstart`, so the canvas is made draggable only
+ * while the pointer is over the selection and goes back to being a selection surface as soon as it
+ * leaves. Setting it permanently would make every attempt to select drag the last file instead.
+ */
+function updateGrabAffordance(event) {
+  const grabbable = overSelection(event) && !event.altKey;
+  canvas.draggable = grabbable;
+  canvas.style.cursor = grabbable ? 'grab' : 'crosshair';
+}
+
+canvas.addEventListener('dragstart', (event) => {
+  // Staged here rather than beforehand: the bytes have to exist by the time the drag begins, and
+  // `dragstart` cannot await. Writing a WAV is a memcpy and a header, so doing it now is fine.
+  if (!stage()) {
+    event.preventDefault();
+    return;
+  }
+  const { name, url } = state.staged;
+  // Chromium only, and it hands over a file *promise* rather than a path — Finder accepts one and
+  // a good many applications do not. The tray's download link is the fallback that always works.
+  event.dataTransfer.setData('DownloadURL', `audio/wav:${name}:${url}`);
+  event.dataTransfer.setData('text/uri-list', url);
+  event.dataTransfer.effectAllowed = 'copy';
+  // Without this the browser ghosts the dragged element, which here is a full-screen canvas.
+  // Carrying a screen-sized translucent image across the desktop is not what taking a two-bar
+  // loop should feel like.
+  event.dataTransfer.setDragImage(dragImage(name), 12, 14);
+  canvas.style.cursor = 'grabbing';
+});
+
+/** A small chip drawn on the fly, so the thing you are carrying looks like a file. */
+function dragImage(name) {
+  const scale = Math.min(devicePixelRatio || 1, 2);
+  const ghost = document.createElement('canvas');
+  const text = `${name}`;
+  const pad = 10;
+  const g = ghost.getContext('2d');
+  g.font = `${12 * scale}px ui-monospace, Menlo, monospace`;
+  const width = g.measureText(text).width + pad * 2 * scale;
+  ghost.width = width;
+  ghost.height = 28 * scale;
+  const h = ghost.getContext('2d');
+  h.font = `${12 * scale}px ui-monospace, Menlo, monospace`;
+  h.fillStyle = '#141922';
+  h.strokeStyle = '#f0b342';
+  h.lineWidth = scale;
+  h.beginPath();
+  h.roundRect(scale / 2, scale / 2, ghost.width - scale, ghost.height - scale, 4 * scale);
+  h.fill();
+  h.stroke();
+  h.fillStyle = '#f0b342';
+  h.textBaseline = 'middle';
+  h.fillText(text, pad * scale, ghost.height / 2);
+  // Off-screen but attached: a detached element cannot be used as a drag image in Chromium.
+  ghost.style.cssText = 'position:fixed;top:-1000px;left:-1000px;pointer-events:none';
+  ghost.style.width = `${ghost.width / scale}px`;
+  ghost.style.height = `${ghost.height / scale}px`;
+  document.body.append(ghost);
+  setTimeout(() => ghost.remove(), 0);
+  return ghost;
+}
+
+canvas.addEventListener('dragend', () => {
+  canvas.style.cursor = 'grab';
+});
+
 canvas.addEventListener('pointerdown', (event) => {
+  // Over the selection the canvas is draggable, and letting the pointer be captured here would
+  // swallow the drag before the browser could start one.
+  if (canvas.draggable) return;
   canvas.setPointerCapture(event.pointerId);
   state.drag = { from: fractionOf(event), moved: false };
 });
 canvas.addEventListener('pointermove', (event) => {
-  if (!state.drag) return;
+  if (!state.drag) {
+    updateGrabAffordance(event);
+    return;
+  }
   const to = fractionOf(event);
   // A pointer that has not travelled a pixel is a click, not a drag. Without this every click
   // becomes a one-pixel drag, and at high zoom those select different things.
@@ -399,7 +489,7 @@ function adjustWindow(direction) {
  */
 function stage() {
   const wr = state.wr;
-  if (!wr) return;
+  if (!wr) return false;
   // Samples since midnight, local: the Broadcast Wave timestamp a host reads to spot a file back
   // where it was captured.
   const now = new Date();
@@ -411,7 +501,7 @@ function stage() {
       pending: 'the last cell has not been captured yet — it will be ready in a moment',
       overwritten: 'that selection has been overwritten',
     }[wr.selection_state()] ?? 'nothing to stage');
-    return;
+    return false;
   }
   discard();
   const name = wr.stage_name();
@@ -425,6 +515,7 @@ function stage() {
   chip.download = name;
   $('tray').hidden = false;
   note(`staged ${name}`);
+  return true;
 }
 
 $('chip').addEventListener('dragstart', (event) => {
