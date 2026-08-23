@@ -100,11 +100,13 @@ juce_add_plugin(Waveroll
   # would have silently become com.WaveContour.Waveroll the moment the company name changed --
   # and a bundle identifier that moves when a display name is edited is one that will move again.
   BUNDLE_ID "dev.Waveroll"
-  # Unchanged deliberately. These four-character codes, not the names above, are what an AU is
-  # identified by: every session that already loads Waveroll finds it through aumf/Wvr1/Wvrl, and
-  # editing them would orphan those sessions and every auval invocation in CI at once. They are
-  # opaque identifiers that happen to look like words.
-  PLUGIN_MANUFACTURER_CODE Wvrl
+  # These four characters, not the names above, are what an AU is identified by -- a host finds
+  # this plug-in as aumf/Wvr1/WvCt and not by any string a person reads. Changing the manufacturer
+  # code is therefore a breaking change: a session saved against Wvrl no longer finds the plug-in.
+  # Done here while the only such sessions are on this machine.
+  #
+  # Apple requires at least one non-lowercase character in a manufacturer code. WvCt has two.
+  PLUGIN_MANUFACTURER_CODE WvCt
   PLUGIN_CODE Wvr1
   FORMATS AU VST3 Standalone
   PRODUCT_NAME "Waveroll"

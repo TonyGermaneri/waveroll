@@ -75,7 +75,7 @@ the AU and VST3 install themselves.
 ```
 cmake -B native/build -S native -G Ninja     # -G matters; see below
 cmake --build native/build
-auval -v aumf Wvr1 Wvrl                      # Logic will not load a plugin that fails this
+auval -v aumf Wvr1 WvCt                      # Logic will not load a plugin that fails this
 ```
 
 Pass the generator explicitly. Configuring without `-G` falls back to Makefiles, and if a
@@ -298,7 +298,7 @@ of a plugin editor loaded in Ableton Live 12.4.1, dropped onto the arrangement. 
 
 Dragging out of a *plugin* is strictly harder than out of an app, because the editor lives inside
 the host's view hierarchy — so this proves it everywhere, and it is the result the whole
-architecture was waiting on. `auval -v aumf Wvr1 Wvrl` also passes, so Logic will load it.
+architecture was waiting on. `auval -v aumf Wvr1 WvCt` also passes, so Logic will load it.
 
 **Spike 1, browser half — Ableton Live 12 refuses it, 22 Aug 2026.** A page can only put a *file
 promise* on the pasteboard (`DataTransfer` + `DownloadURL`, Chromium only). Live does not accept

@@ -117,7 +117,7 @@ jobs:
             ~/Library/Audio/Plug-Ins/Components
           killall -9 AudioComponentRegistrar || true
           sleep 2
-          auval -v aumf Wvr1 Wvrl
+          auval -v aumf Wvr1 WvCt
 
       - uses: actions/upload-artifact@v4
         with:
