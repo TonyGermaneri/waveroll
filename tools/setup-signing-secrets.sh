@@ -33,13 +33,40 @@ printf '\n'
 
 # Checked here rather than discovered in CI. A wrong password fails the keychain import halfway
 # through a tag build, and the error it gives names neither the password nor the certificate.
-if ! openssl pkcs12 -in "$p12" -passin pass:"$p12_password" -noout -nokeys 2>/dev/null; then
-  echo "that password does not open $p12" >&2; exit 1
+#
+# Which openssl, and with which flags, is not a given. A Keychain Access export may be encrypted
+# with an algorithm OpenSSL 3 moved behind -legacy, while the LibreSSL at /usr/bin/openssl reads
+# both and takes no such flag. So this tries the combinations and uses the first that works,
+# rather than asserting one and failing on a machine that has the other.
+openssls=()
+[ -x /usr/bin/openssl ] && openssls+=(/usr/bin/openssl)
+other="$(command -v openssl || true)"
+[ -n "$other" ] && [ "$other" != /usr/bin/openssl ] && openssls+=("$other")
+
+read_p12() {  # <openssl> <extra flags...> -- prints the certificate subjects, or fails
+  local ossl="$1"; shift
+  "$ossl" pkcs12 -in "$p12" -passin pass:"$p12_password" -nokeys -clcerts "$@" 2>/dev/null \
+    | "$ossl" x509 -noout -subject 2>/dev/null
+}
+
+subjects=""
+for ossl in "${openssls[@]}"; do
+  subjects="$(read_p12 "$ossl" || true)"
+  [ -n "$subjects" ] && break
+  subjects="$(read_p12 "$ossl" -legacy || true)"
+  [ -n "$subjects" ] && break
+done
+
+if [ -z "$subjects" ]; then
+  echo "could not read $p12 -- wrong password, or an export this openssl cannot decrypt" >&2
+  echo "tried: ${openssls[*]}" >&2
+  exit 1
 fi
 
-identities="$(openssl pkcs12 -in "$p12" -passin pass:"$p12_password" -nokeys -clcerts 2>/dev/null \
-  | openssl x509 -noout -subject 2>/dev/null | grep -o 'Developer ID Application[^/,]*' || true)"
-[ -n "$identities" ] || { echo "$p12 holds no Developer ID Application certificate" >&2; exit 1; }
+identities="$(printf '%s' "$subjects" | grep -o 'Developer ID Application[^/,]*' || true)"
+[ -n "$identities" ] || {
+  echo "$p12 opens, but holds no Developer ID Application certificate:" >&2
+  printf '%s\n' "$subjects" >&2; exit 1; }
 echo "  certificate: $identities"
 
 grep -q 'BEGIN PRIVATE KEY' "$p8" || { echo "$p8 does not look like an App Store Connect key" >&2; exit 1; }
