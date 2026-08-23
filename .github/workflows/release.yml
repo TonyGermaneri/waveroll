@@ -53,7 +53,15 @@ jobs:
           security create-keychain -p "$password" "$keychain"
           security set-keychain-settings -lut 21600 "$keychain"
           security unlock-keychain -p "$password" "$keychain"
-          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12" 2>/dev/null || true
+          # A PKCS#12 begins with an ASN.1 SEQUENCE, 0x30. Checked because the secret has to be
+          # base64 of a binary file, and pasting the file itself is the obvious thing to try --
+          # which fails much later, in security import, with a message about neither.
+          if [ "$(head -c1 "$RUNNER_TEMP/cert.p12" | od -An -tx1 | tr -d ' ')" != "30" ]; then
+            echo "MACOS_CERTIFICATE_P12 did not base64-decode to a .p12" >&2
+            echo "set it with: base64 -i cert.p12 | gh secret set MACOS_CERTIFICATE_P12" >&2
+            exit 1
+          fi
           security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" \
             -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
@@ -67,14 +75,27 @@ jobs:
           # of quietly producing an ad-hoc build the notes would then describe wrongly. off when
           # there is not, so a fork can still cut a release -- an honest unsigned one.
           WAVEROLL_NOTARIZE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && 'required' || 'off' }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          # Empty on a fork, which package-macos.sh reads as "find the one identity in the
+          # keychain" -- the same thing it does on a laptop.
+          WAVEROLL_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
         run: |
-          if [ -n "$APPLE_API_KEY_P8" ]; then
-            export APPLE_API_KEY_PATH="$RUNNER_TEMP/api.p8"
-            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$APPLE_API_KEY_PATH"
-            chmod 600 "$APPLE_API_KEY_PATH"
+          if [ -n "$NOTARY_KEY_P8" ]; then
+            export NOTARY_KEY_PATH="$RUNNER_TEMP/api.p8"
+            # A .p8 is PEM text, so pasting the file's contents straight into the secret is the
+            # natural thing to do and works fine -- but so is base64-ing it, as the binary .p12
+            # next to it requires. Both are accepted rather than one being declared correct.
+            if printf '%s' "$NOTARY_KEY_P8" | grep -q 'BEGIN PRIVATE KEY'; then
+              printf '%s\n' "$NOTARY_KEY_P8" > "$NOTARY_KEY_PATH"
+            else
+              printf '%s' "$NOTARY_KEY_P8" | base64 --decode > "$NOTARY_KEY_PATH" 2>/dev/null || true
+            fi
+            chmod 600 "$NOTARY_KEY_PATH"
+            grep -q 'BEGIN PRIVATE KEY' "$NOTARY_KEY_PATH" || {
+              echo "NOTARY_KEY_P8 is neither an App Store Connect key nor base64 of one" >&2
+              exit 1; }
           fi
           tools/package-macos.sh ${{ github.ref_name }}
           rm -f "$RUNNER_TEMP/api.p8"

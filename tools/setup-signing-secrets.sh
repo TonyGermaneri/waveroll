@@ -77,9 +77,12 @@ echo "  issuer:      $issuer"
 # only thing this protects against is the transport mangling a byte.
 base64 -i "$p12" | gh secret set MACOS_CERTIFICATE_P12
 printf '%s' "$p12_password" | gh secret set MACOS_CERTIFICATE_PASSWORD
-base64 -i "$p8"  | gh secret set APPLE_API_KEY_P8
-printf '%s' "$key_id" | gh secret set APPLE_API_KEY_ID
-printf '%s' "$issuer" | gh secret set APPLE_API_ISSUER_ID
+# Read out of the certificate rather than typed: this string has to match what codesign expects
+# exactly, and it is the sort of thing that gets a space or a bracket wrong when copied by hand.
+printf '%s' "$identities" | gh secret set MACOS_SIGN_IDENTITY
+base64 -i "$p8"  | gh secret set NOTARY_KEY_P8
+printf '%s' "$key_id" | gh secret set NOTARY_KEY_ID
+printf '%s' "$issuer" | gh secret set NOTARY_ISSUER_ID
 
 echo
 echo "Set. Names only -- GitHub cannot show a value back, to anyone, ever:"

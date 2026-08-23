@@ -12,7 +12,7 @@
 #   WAVEROLL_SIGN_IDENTITY   a codesign identity, or "-" to force ad-hoc; otherwise the one
 #                            Developer ID Application identity in the keychain, otherwise ad-hoc
 #   WAVEROLL_NOTARIZE        auto (default) | required | off
-#   APPLE_API_KEY_PATH       App Store Connect .p8, with APPLE_API_KEY_ID and APPLE_API_ISSUER_ID
+#   NOTARY_KEY_PATH       App Store Connect .p8, with NOTARY_KEY_ID and NOTARY_ISSUER_ID
 #
 # `required` is what a release passes, so a missing credential stops the build rather than quietly
 # shipping something the release notes claim is notarised.
@@ -49,8 +49,8 @@ if [ -z "${identity}" ] && [ "${WAVEROLL_SIGN_IDENTITY:-}" != "-" ]; then
 fi
 
 have_creds=0
-if [ -n "${APPLE_API_KEY_PATH:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] \
-   && [ -n "${APPLE_API_ISSUER_ID:-}" ] && [ -f "${APPLE_API_KEY_PATH:-}" ]; then
+if [ -n "${NOTARY_KEY_PATH:-}" ] && [ -n "${NOTARY_KEY_ID:-}" ] \
+   && [ -n "${NOTARY_ISSUER_ID:-}" ] && [ -f "${NOTARY_KEY_PATH:-}" ]; then
   have_creds=1
 fi
 
@@ -142,7 +142,7 @@ package Standalone Waveroll.app
 
 if [ "$do_notarize" = 1 ]; then
   nt() { xcrun notarytool "$@" \
-    --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"; }
+    --key "$NOTARY_KEY_PATH" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"; }
 
   # Submitted together and waited on afterwards rather than one --wait at a time: Apple queues
   # these, and three sequential waits is three queue times instead of one.

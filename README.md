@@ -188,15 +188,19 @@ and load with no warning, and Gatekeeper can clear them with no network. Routine
 they do not need the credentials, and not handing them to every build is the cheapest security
 decision available.
 
-Five repository secrets, none of which appear in this repository or in any log:
+Six repository secrets, none of which appear in this repository or in any log:
 
 | Secret | Is |
 | --- | --- |
 | `MACOS_CERTIFICATE_P12` | the Developer ID Application certificate and its key, exported as PKCS#12, base64 |
 | `MACOS_CERTIFICATE_PASSWORD` | the password set on that export |
-| `APPLE_API_KEY_P8` | an App Store Connect key, base64 |
-| `APPLE_API_KEY_ID` | its Key ID |
-| `APPLE_API_ISSUER_ID` | its Issuer ID |
+| `MACOS_SIGN_IDENTITY` | the identity string, e.g. `Developer ID Application: Name (TEAMID)` |
+| `NOTARY_KEY_P8` | an App Store Connect key, base64 or the PEM text itself |
+| `NOTARY_KEY_ID` | its Key ID |
+| `NOTARY_ISSUER_ID` | its Issuer ID |
+
+`MACOS_SIGN_IDENTITY` is belt and braces: with one Developer ID in the keychain the build finds it
+unaided, and naming it means a runner that somehow has two does not pick by luck.
 
 `tools/setup-signing-secrets.sh` sets all five, checking the certificate and the key before it
 uploads either — a typo here otherwise surfaces as a failed release twenty minutes into a tag build.
