@@ -105,6 +105,15 @@ juce_add_plugin(Waveroll
   NEEDS_MIDI_OUTPUT FALSE
   IS_MIDI_EFFECT FALSE
   EDITOR_WANTS_KEYBOARD_FOCUS TRUE
+  # Puts NSMicrophoneUsageDescription in the standalone's Info.plist. Without it macOS does not
+  # prompt for input access, it simply denies it, and a recorder that records silence looks like
+  # a bug in the recorder. The plug-ins do not use this -- the host asks on their behalf.
+  MICROPHONE_PERMISSION_ENABLED TRUE
+  MICROPHONE_PERMISSION_TEXT "Waveroll records the input you choose into its rolling buffer."
+  # Notarisation refuses anything not built against the hardened runtime. This covers the Xcode
+  # generator; the Ninja build gets the same flag from codesign in tools/package-macos.sh, which
+  # is where the signing actually happens.
+  HARDENED_RUNTIME_ENABLED TRUE
   COPY_PLUGIN_AFTER_BUILD ${WAVEROLL_INSTALL_AFTER_BUILD})
 
 target_sources(Waveroll PRIVATE

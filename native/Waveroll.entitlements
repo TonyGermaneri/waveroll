@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The standalone build's own entitlements. Waveroll's whole job is to record what is coming
+       in, and under the hardened runtime an app cannot open an input device without this. The
+       plug-ins get no entitlements at all: they run inside the host's process, where it is the
+       host's entitlements that apply and their own are ignored. -->
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

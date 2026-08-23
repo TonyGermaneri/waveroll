@@ -93,8 +93,14 @@ jobs:
       - name: Install Ninja
         run: brew list ninja >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ninja
 
-      # Builds Release, universal, ad-hoc signs, and checks the slices. See tools/package-macos.sh.
+      # Builds Release, universal, and checks the slices. See tools/package-macos.sh.
+      #
+      # Deliberately ad-hoc: routine builds do not need the signing secrets, and not handing them
+      # to every push is the cheapest security decision available. Signing happens at a tag.
       - name: Build and package
+        env:
+          WAVEROLL_SIGN_IDENTITY: '-'
+          WAVEROLL_NOTARIZE: 'off'
         run: tools/package-macos.sh ci-${{ github.sha }}
 
       # Logic will not load a plug-in that fails this, and its complaints are about things --

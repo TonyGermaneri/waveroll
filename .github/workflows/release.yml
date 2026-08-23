@@ -30,8 +30,57 @@ jobs:
       - name: Install Ninja
         run: brew list ninja >/dev/null 2>&1 || HOMEBREW_NO_AUTO_UPDATE=1 brew install ninja
 
+      # The certificate goes into a keychain of its own, created for this job and deleted after it,
+      # so nothing is left behind on a runner and nothing touches the login keychain.
+      #
+      # set-key-partition-list is the line that matters and the one that is easy to leave out:
+      # without it codesign is not on the key's access list, and it waits for a UI prompt that a
+      # runner has no way to answer. The job does not fail, it hangs until the timeout.
+      - name: Import the signing certificate
+        if: env.HAVE_CERT == 'true'
+        env:
+          HAVE_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/waveroll.keychain-db"
+          password="$(openssl rand -base64 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain"
+          security list-keychain -d user -s "$keychain" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$keychain" | grep 'Developer ID Application'
+
       - name: Build and package
-        run: tools/package-macos.sh ${{ github.ref_name }}
+        env:
+          # required when there is a certificate, so a broken credential stops the release instead
+          # of quietly producing an ad-hoc build the notes would then describe wrongly. off when
+          # there is not, so a fork can still cut a release -- an honest unsigned one.
+          WAVEROLL_NOTARIZE: ${{ secrets.MACOS_CERTIFICATE_P12 != '' && 'required' || 'off' }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$APPLE_API_KEY_P8" ]; then
+            export APPLE_API_KEY_PATH="$RUNNER_TEMP/api.p8"
+            printf '%s' "$APPLE_API_KEY_P8" | base64 --decode > "$APPLE_API_KEY_PATH"
+            chmod 600 "$APPLE_API_KEY_PATH"
+          fi
+          tools/package-macos.sh ${{ github.ref_name }}
+          rm -f "$RUNNER_TEMP/api.p8"
+
+      # always(), because a keychain left on a runner after a failed build is the one thing here
+      # worth being fussy about.
+      - name: Clean up
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/waveroll.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/api.p8" "$RUNNER_TEMP/cert.p12"
 
       # The binary that gets published is the binary that gets validated. Building a second time
       # to test would be testing a different build.
@@ -47,7 +96,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/macos/*.zip
+          # Not just the zips: signing.txt rides along so the notes can describe the build that was
+          # made. It is not a zip, so the publish job does not attach it to the release.
+          path: dist/macos/*
 
   web:
     name: Web
@@ -94,7 +145,10 @@ jobs:
           cd dist && sha256sum ./*.zip | sed 's|\./||' | tee SHA256SUMS.txt
 
       - name: Write the notes
-        run: tools/release-notes.sh "${{ github.ref_name }}" > dist/NOTES.md
+        run: |
+          WAVEROLL_SIGNING="$(cat incoming/macos/signing.txt 2>/dev/null || echo ad-hoc)" \
+            tools/release-notes.sh "${{ github.ref_name }}" > dist/NOTES.md
+          head -20 dist/NOTES.md
 
       - name: Publish
         env:

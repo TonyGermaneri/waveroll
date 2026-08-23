@@ -24,6 +24,19 @@ Unzip and put the bundle where the host looks for it:
 | `Waveroll.component` (AU) | `~/Library/Audio/Plug-Ins/Components` |
 | `Waveroll.vst3` | `~/Library/Audio/Plug-Ins/VST3` |
 | `Waveroll.app` | `/Applications`, or anywhere |
+EOF
+
+# What the notes may claim is what tools/package-macos.sh recorded doing, not what the workflow
+# meant to do. A release that says "notarised" about an ad-hoc build is worse than one that says
+# nothing, because the first thing it costs is somebody's trust in the rest of the page.
+if [ "${WAVEROLL_SIGNING:-ad-hoc}" = notarised ]; then
+cat <<'EOF'
+
+Signed with a Developer ID, notarised by Apple, and stapled — so they install and load with no
+warning, and with no network needed to check. Universal (arm64 and x86_64), macOS 13 and later.
+EOF
+else
+cat <<'EOF'
 
 These builds are **not signed with a Developer ID or notarised**, so macOS quarantines them on
 download and a host will refuse to load one without saying why. Clear the flag after unzipping:
@@ -32,8 +45,14 @@ download and a host will refuse to load one without saying why. Clear the flag a
 xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/Components/Waveroll.component
 ```
 
-Universal (arm64 and x86_64), macOS 13 and later. The Audio Unit is validated with `auval` in the
-same job that built it, so it is the binary here that passed, not one like it.
+Universal (arm64 and x86_64), macOS 13 and later.
+EOF
+fi
+
+cat <<'EOF'
+
+The Audio Unit is validated with `auval` in the same job that built it, so it is the binary here
+that passed, not one like it.
 
 The web build is the same core compiled to WebAssembly. It captures and draws, but a browser
 cannot hand a file to another application by drag -- it can only offer a promise, which no DAW
