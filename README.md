@@ -11,6 +11,32 @@ without writing to it, so there is no line of code in the audio path that could 
 Full build plan and the reasoning behind the decisions below:
 <https://claude.ai/code/artifact/8fac4c8d-7b68-405a-840e-5da3ba29627c>
 
+## Installing it
+
+Download from [Releases](https://github.com/TonyGermaneri/waveroll/releases/latest). Each zip holds
+one bundle; double-click to unzip, then move the bundle where the host looks for it. Those folders
+already exist if you have ever installed a plug-in — and if they do not, create them.
+
+| Download | Unzips to | Move it to |
+| --- | --- | --- |
+| `…-macOS-AU.zip` | `Waveroll.component` | `~/Library/Audio/Plug-Ins/Components` |
+| `…-macOS-VST3.zip` | `Waveroll.vst3` | `~/Library/Audio/Plug-Ins/VST3` |
+| `…-macOS-Standalone.zip` | `Waveroll.app` | `/Applications`, or anywhere you like |
+
+`~` is your home folder. In Finder, **Go → Go to Folder…** and paste
+`~/Library/Audio/Plug-Ins` — that library folder is hidden, so browsing to it does not work.
+
+Then start your DAW. Live and Logic scan at launch, so a plug-in installed while one is running
+will not appear until it is restarted or told to rescan.
+
+The releases are signed with a Developer ID and notarised, so there is nothing else to do: no
+Gatekeeper warning, no right-click-Open, no `xattr` incantation. If you ever see *"Waveroll cannot
+be opened"*, the build did not come from the Releases page.
+
+Rather not install anything: <https://tonygermaneri.github.io/waveroll/> runs the same core in a
+browser. It captures and draws, but it cannot drag a file into a DAW — no web API can hand another
+application a file path — so it writes into a folder you pick instead.
+
 ## Using it
 
 Drop it on a track and press play. Capture follows the host transport — no transport, no capture —
