@@ -187,11 +187,16 @@ without saying why. The release notes carry the `xattr -dr com.apple.quarantine`
 needs a paid Developer ID certificate and an app-specific password in repository secrets; until
 those exist, saying so is better than shipping a plug-in that appears not to work.
 
-Pushing to `main` also deploys the browser build to GitHub Pages — **once Pages has been switched
-on by hand**, under Settings → Pages → Build and deployment → Source: *GitHub Actions*. That step
-cannot be automated: creating a Pages site is an administration-scoped API and no `GITHUB_TOKEN` can
-hold that scope, whatever the workflow asks for. Until it is switched on the job builds the site,
-skips the deploy, and says so in a notice rather than going red.
+Pushing to `main` also deploys the browser build to **<https://tonygermaneri.github.io/waveroll/>**.
+Every path on that page is relative, which is what lets it serve from a subpath rather than a domain
+root.
+
+On a fresh fork the deploy is skipped until Pages is switched on by hand, under Settings → Pages →
+Build and deployment → Source: *GitHub Actions*. That one step cannot be automated: creating a Pages
+site is an administration-scoped API, and no `GITHUB_TOKEN` can hold that scope however the workflow
+asks for it. So the job checks instead of assuming — it builds the site either way and reports a
+notice rather than going red, because a build that stays red until somebody visits a settings page
+is a build people learn to ignore.
 
 Pages cannot set the COOP and COEP headers, so the hosted copy is not cross-origin isolated:
 `SharedArrayBuffer` is unavailable there and `web/src/ring.js` falls back to a plain `ArrayBuffer` —
