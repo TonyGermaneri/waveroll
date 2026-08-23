@@ -180,12 +180,45 @@ fine for iterating and not fine to hand somebody. And it passes
 `-DWAVEROLL_INSTALL_AFTER_BUILD=OFF`, because packaging a release should not reach into the plug-in
 folders and swap out whatever the machine is currently running.
 
-**Nothing is signed with a Developer ID or notarised.** The bundles are ad-hoc signed, which is all
-an unsigned project can do and all arm64 needs in order to load at all, but it does not clear the
-quarantine flag macOS puts on a downloaded zip — and a host given a quarantined plug-in declines it
-without saying why. The release notes carry the `xattr -dr com.apple.quarantine` line. Real signing
-needs a paid Developer ID certificate and an app-specific password in repository secrets; until
-those exist, saying so is better than shipping a plug-in that appears not to work.
+### Signing
+
+A tag builds signed with a Developer ID, notarised by Apple, and stapled — so the bundles install
+and load with no warning, and Gatekeeper can clear them with no network. Routine pushes stay ad-hoc:
+they do not need the credentials, and not handing them to every build is the cheapest security
+decision available.
+
+Five repository secrets, none of which appear in this repository or in any log:
+
+| Secret | Is |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12` | the Developer ID Application certificate and its key, exported as PKCS#12, base64 |
+| `MACOS_CERTIFICATE_PASSWORD` | the password set on that export |
+| `APPLE_API_KEY_P8` | an App Store Connect key, base64 |
+| `APPLE_API_KEY_ID` | its Key ID |
+| `APPLE_API_ISSUER_ID` | its Issuer ID |
+
+The certificate goes into a keychain created for the job and deleted after it, so nothing is left on
+a runner and the login keychain is never touched. The line that matters there is
+`security set-key-partition-list`: without it `codesign` is not on the key's access list and waits
+for a prompt a runner cannot answer — the job does not fail, it hangs until the timeout.
+
+An App Store Connect key rather than an Apple ID and app-specific password: it does not expire, has
+no second factor to get in the way, and is not also the credential to the rest of an Apple account.
+
+Three things are worth knowing rather than assuming. **Log masking is shallow** — Actions redacts
+exact matches of a secret, not transformations of one, which is why the workflow decodes to a file
+instead of echoing and why the check greps for `Developer ID Application` rather than dumping the
+identity list. **Secrets protect against outsiders, not collaborators**: they are withheld from fork
+pull requests, but anyone with write access can push a workflow that prints one. If this ever gets
+collaborators, move these into an Environment with required reviewers. And a **release fails rather
+than degrades**: with a certificate configured the tag build passes `WAVEROLL_NOTARIZE=required`, so
+a broken credential stops it instead of quietly producing an ad-hoc build.
+
+Without the secrets — on a fork, say — a tag still releases. It comes out ad-hoc signed, which is
+all arm64 needs to load at all but does not clear the quarantine flag macOS puts on a downloaded
+zip, and a host handed a quarantined plug-in declines it without saying why. `package-macos.sh`
+records which of the two happened and `release-notes.sh` reads that, so the page describes the build
+that was made: unsigned builds get the `xattr -dr com.apple.quarantine` line, signed ones do not.
 
 Pushing to `main` also deploys the browser build to **<https://tonygermaneri.github.io/waveroll/>**.
 Every path on that page is relative, which is what lets it serve from a subpath rather than a domain
