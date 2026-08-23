@@ -95,7 +95,15 @@ option(WAVEROLL_INSTALL_AFTER_BUILD "Copy the built plug-ins into the user's plu
 
 juce_add_plugin(Waveroll
   VERSION 0.1.${WAVEROLL_BUILD}
-  COMPANY_NAME "Waveroll"
+  COMPANY_NAME "WaveContour"
+  # Named rather than derived. JUCE would otherwise build it as com.<company>.<target>, so it
+  # would have silently become com.WaveContour.Waveroll the moment the company name changed --
+  # and a bundle identifier that moves when a display name is edited is one that will move again.
+  BUNDLE_ID "dev.Waveroll"
+  # Unchanged deliberately. These four-character codes, not the names above, are what an AU is
+  # identified by: every session that already loads Waveroll finds it through aumf/Wvr1/Wvrl, and
+  # editing them would orphan those sessions and every auval invocation in CI at once. They are
+  # opaque identifiers that happen to look like words.
   PLUGIN_MANUFACTURER_CODE Wvrl
   PLUGIN_CODE Wvr1
   FORMATS AU VST3 Standalone
