@@ -37,12 +37,17 @@ jobs:
       # without it codesign is not on the key's access list, and it waits for a UI prompt that a
       # runner has no way to answer. The job does not fail, it hangs until the timeout.
       - name: Import the signing certificate
-        if: env.HAVE_CERT == 'true'
         env:
-          HAVE_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 != '' }}
           P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
+          # Skipped in shell rather than in an `if:`, because the secrets context is not available
+          # to a step's if -- the usual dance is to launder it through env first, and this needs no
+          # dance. A fork with no certificate falls through to an honest ad-hoc build.
+          if [ -z "$P12" ]; then
+            echo "no certificate configured; this build will be ad-hoc"
+            exit 0
+          fi
           keychain="$RUNNER_TEMP/waveroll.keychain-db"
           password="$(openssl rand -base64 24)"
           security create-keychain -p "$password" "$keychain"
