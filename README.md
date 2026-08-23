@@ -104,6 +104,7 @@ tools/
   clock-trace.html  captures a MIDI clock stream for tests/replay.rs
   package-*.sh      the release build and packaging, runnable before a tag exists
   release-notes.sh  the body of a GitHub release, readable before it is published
+  setup-signing-secrets.sh   the five signing secrets, set once and again at renewal
 .github/workflows/
   ci.yml            tests, lint, and every target, on every push
   release.yml       a v* tag builds each target and publishes the zips
@@ -196,6 +197,11 @@ Five repository secrets, none of which appear in this repository or in any log:
 | `APPLE_API_KEY_P8` | an App Store Connect key, base64 |
 | `APPLE_API_KEY_ID` | its Key ID |
 | `APPLE_API_ISSUER_ID` | its Issuer ID |
+
+`tools/setup-signing-secrets.sh` sets all five, checking the certificate and the key before it
+uploads either — a typo here otherwise surfaces as a failed release twenty minutes into a tag build.
+It is a script rather than a paragraph because a Developer ID expires in five years, by which point
+nobody remembers how these were made.
 
 The certificate goes into a keychain created for the job and deleted after it, so nothing is left on
 a runner and the login keychain is never touched. The line that matters there is
