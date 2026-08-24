@@ -1,4 +1,4 @@
-# Waveroll's native builds: AU, VST3, CLAP and a standalone app from one target.
+# Waveroll's native builds: AU, VST3 and a standalone app from one target.
 #
 # JUCE is here for one reason above all others -- it emits AU, and Logic loads nothing else. It
 # also emits a standalone app, which is why there is no separate desktop shell in this project.
