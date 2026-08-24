@@ -1,4 +1,5 @@
-//! Transport, tempo estimation, and the rule that decides whether a block is captured at all.
+//! Transport, tempo estimation, and the rules that decide whether a block is captured at all and
+//! where it lands on the grid when it is.
 //!
 //! Five things can tell Waveroll what time it is — a plugin host, Ableton Link, MIDI clock, a
 //! tapped or typed tempo, and (last resort) onset detection. They differ enormously in what they
@@ -8,6 +9,11 @@
 //!
 //! The MIDI-clock estimator is here too, because it is the only source that has to *derive* a
 //! tempo rather than being told one.
+//!
+//! The second rule is the splice: a transport that stops and starts again has almost certainly
+//! moved, and audio captured either side of that is adjacent in the ring while being bars apart in
+//! the song. [`CaptureClock`] detects it and says how much dead time to lay down so the bar lines
+//! carry on landing where the music does.
 
 use crate::tempo::{Meter, TempoMap};
 
@@ -27,14 +33,26 @@ pub struct Transport {
     /// render and leave the window holding the last sixteen bars of the export. No buffering
     /// scheme helps — an A/B pair fills both halves just as fast. Only refusing to write does.
     pub offline: bool,
+    /// Where the playhead is, in quarter notes from wherever the source counts from. `None` from
+    /// a source that has no idea — which is most of them, most of the time.
+    ///
+    /// Only the *fraction of a bar* is ever used, and only at a splice. That is what makes a
+    /// partial answer worth having: MIDI clock counts from the last `Start` rather than from the
+    /// top of the song, and a host that reports a position at all reports one good to the sample.
+    /// Neither is asked to agree with the other, or with itself across a stop.
+    pub position: Option<f64>,
 }
 
 impl Transport {
     pub fn stopped(bpm: f64, meter: Meter) -> Transport {
-        Transport { playing: false, bpm, meter, offline: false }
+        Transport { playing: false, bpm, meter, offline: false, position: None }
     }
     pub fn rolling(bpm: f64, meter: Meter) -> Transport {
-        Transport { playing: true, bpm, meter, offline: false }
+        Transport { playing: true, bpm, meter, offline: false, position: None }
+    }
+    /// Rolling, and able to say where. `quarters` counts from the top of the song.
+    pub fn at(bpm: f64, meter: Meter, quarters: f64) -> Transport {
+        Transport { playing: true, bpm, meter, offline: false, position: Some(quarters) }
     }
 }
 
@@ -43,22 +61,81 @@ pub trait ClockSource {
     fn poll(&mut self) -> Transport;
 }
 
+/// How much of one block [`CaptureClock::advance`] decided to take, and what has to be laid down
+/// in front of it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Advance {
+    /// Frames of silence to write to the ring **before** the block, to bring the grid back into
+    /// phase with the song. Zero on every block but the first after a splice, and often zero
+    /// there too.
+    pub seam: u64,
+    /// How many of the block's frames to capture: all of them, or none.
+    pub frames: usize,
+}
+
 /// Owns the tempo map and decides how much of each block reaches the ring.
 ///
-/// The counter it maintains is **capture frames**: elapsed transport time, monotonic, gapless, and
-/// unaware that a locate ever happened. A DAW looping four bars fills the window with four passes
-/// of the same bars, and ruling the grid in song position would make the bar numbers run backwards
+/// The counter it maintains is **capture frames**: elapsed transport time, monotonic, and unaware
+/// that a locate ever happened. A DAW looping four bars fills the window with four passes of the
+/// same bars, and ruling the grid in song position would make the bar numbers run backwards
 /// halfway across the screen. Song position, if it is wanted, is display metadata hung off the
 /// side — never the axis.
+///
+/// # Splices, and why capture time is no longer gapless
+///
+/// Capture time being *elapsed transport time* means the frame before a stop and the frame after
+/// the next play are neighbours in the ring, however far apart the playhead jumped in between.
+/// The grid is ruled from that axis, so the bar lines drawn over the resumed audio sit at whatever
+/// phase the stop happened to leave behind. Press stop in almost any DAW and the playhead returns
+/// to the arrangement start; press play again and the take now begins some arbitrary fraction of a
+/// bar into a cell. Everything downstream inherits it: a "four bar" selection is four bars long
+/// but starts in the middle of one, and the exported loop will not line up against anything.
+///
+/// So the axis is kept, and a **seam** is inserted at each splice: dead frames, fewer than one
+/// bar of them, placed so that the first frame of resumed audio lands on the same fraction of a
+/// bar the song is on. The alternative — leaving a hole in bar space and no frames to match —
+/// gives back a four-bar clip holding three and a half bars of audio, which is the failure that
+/// never looks like a bug.
+///
+/// Three properties fall out of doing it this way and all three are load-bearing:
+///
+/// * **Bars stay monotonic.** The correction is always forwards, to the *next* aligned position,
+///   never back to the nearest one.
+/// * **Frames and bars stay in step.** The seam is real frames, so `n` bars of selection is still
+///   `n` bars of audio and still loops.
+/// * **Pausing costs nothing.** A host that resumes where it stopped is already in phase, so the
+///   seam computes to zero. Only a genuine jump spends any ring, which is the only case where
+///   something genuinely happened.
+///
+/// The one thing the clock cannot do is lay the silence down itself — it does not own the ring —
+/// so [`Advance::seam`] hands that to the caller, who must write it before the block.
 #[derive(Debug)]
 pub struct CaptureClock {
     map: TempoMap,
     captured: u64,
     playing: bool,
+    /// Whether the previous block reached the ring. A block that captures after one that did not
+    /// begins a new run of audio, whatever stopped the last one — a stop, an export, a host that
+    /// handed over nothing.
+    capturing: bool,
+    /// Where the playhead should be at the start of the next block if the transport simply rolls
+    /// on. A reported position far from this is a locate rather than the passage of time.
+    expected: Option<f64>,
+    /// Dead frames inserted at splices. Reported so a test — or a panel — can tell the difference
+    /// between a gap in the picture and a fault in the capture.
+    seam_frames: u64,
     /// Blocks refused because the host was rendering offline. Surfaced so the panel can say
     /// "paused during export" rather than appearing to have died.
     offline_blocks: u64,
 }
+
+/// How far a reported position may miss its prediction before it counts as a locate rather than
+/// as jitter, in quarter notes.
+///
+/// A whole beat is deliberately loose. Under-detecting is nearly free — a loop that wraps on a bar
+/// line is already in phase, so the seam it would have inserted is zero — while over-detecting on
+/// a host with a noisy position report would spend ring on nothing at all.
+const LOCATE_QUARTERS: f64 = 1.0;
 
 impl CaptureClock {
     pub fn new(sample_rate: u32, bpm: f64, meter: Meter) -> CaptureClock {
@@ -66,6 +143,9 @@ impl CaptureClock {
             map: TempoMap::new(sample_rate, bpm, meter),
             captured: 0,
             playing: false,
+            capturing: false,
+            expected: None,
+            seam_frames: 0,
             offline_blocks: 0,
         }
     }
@@ -78,30 +158,105 @@ impl CaptureClock {
     /// Frames captured so far. This is the ring's absolute frame index, and the grid's x-axis.
     pub fn captured(&self) -> u64 { self.captured }
     pub fn is_playing(&self) -> bool { self.playing }
+    /// Whether the last block reached the ring. Differs from [`is_playing`](Self::is_playing)
+    /// during an export, which reports rolling and captures nothing.
+    pub fn is_capturing(&self) -> bool { self.capturing }
     pub fn offline_blocks(&self) -> u64 { self.offline_blocks }
+    /// Dead frames laid down at splices, over the life of the clock.
+    pub fn seam_frames(&self) -> u64 { self.seam_frames }
 
-    /// Call once per block, before writing to the ring. Returns how many of `frames` to capture:
-    /// all of them, or none.
+    /// Call once per block, before writing to the ring. Says how many of `frames` to capture —
+    /// all of them, or none — and how much silence to lay down in front of them.
     ///
     /// Partial capture is deliberately not offered. A transport that starts mid-block is out by at
     /// most one buffer — under a millisecond at any sane size — and the calibration offset exists
     /// to absorb exactly that. Splitting a block would buy back a fraction of that error in
-    /// exchange for a seam in the ring and a second code path through the hottest loop here.
-    pub fn advance(&mut self, transport: &Transport, frames: usize) -> usize {
+    /// exchange for a discontinuity in the ring and a second code path through the hottest loop
+    /// here.
+    ///
+    /// The caller must write [`Advance::seam`] frames of silence *before* the block's audio, and
+    /// must not write it twice: the clock has already counted those frames.
+    pub fn advance(&mut self, transport: &Transport, frames: usize) -> Advance {
         if transport.offline {
             self.offline_blocks += 1;
             self.playing = transport.playing;
-            return 0;
+            // An export is a gap in the take like any other, and the passage after it is somewhere
+            // else entirely. Saying so here is what makes the resumption re-align.
+            self.capturing = false;
+            return Advance::default();
         }
         self.playing = transport.playing;
-        if !transport.playing || frames == 0 {
-            return 0;
+        if !transport.playing {
+            self.capturing = false;
+            return Advance::default();
+        }
+        if frames == 0 {
+            // A block with nothing in it is not a stop, it is nothing at all — hosts hand one over
+            // for a bypass or a suspended graph. Calling it a splice would spend most of a bar of
+            // ring re-phasing a transport that never moved.
+            return Advance::default();
         }
         // The change is recorded at the frame it takes effect, which is the start of this block —
-        // recording it at the end would attribute a block of audio to the wrong tempo.
+        // recording it at the end would attribute a block of audio to the wrong tempo. It goes in
+        // ahead of the seam so the dead frames are ruled at the tempo of the passage they
+        // introduce rather than the one they follow, which is what makes the arithmetic below a
+        // single segment's worth.
         self.map.push(self.captured, transport.bpm, transport.meter);
+
+        let spliced = !self.capturing || self.located(transport.position);
+        let seam = if spliced { self.realign(transport.position, frames) } else { 0 };
+        self.captured += seam;
+        self.seam_frames += seam;
         self.captured += frames as u64;
-        frames
+        self.capturing = true;
+        self.expected = transport
+            .position
+            .map(|q| q + frames as f64 * transport.bpm / (60.0 * self.map.sample_rate()));
+        Advance { seam, frames }
+    }
+
+    /// Whether the transport jumped rather than rolled on — a locate, a loop wrap, or a host
+    /// coming back from somewhere else.
+    ///
+    /// Only answerable when the source reports a position at all *and* reported one last block.
+    /// A source that says nothing is not silently assumed to have stayed put; it simply never
+    /// triggers this, and the `capturing` edge catches the stops.
+    fn located(&self, position: Option<f64>) -> bool {
+        match (position, self.expected) {
+            (Some(now), Some(expected)) => (now - expected).abs() > LOCATE_QUARTERS,
+            _ => false,
+        }
+    }
+
+    /// Frames of silence that would put the next captured frame on the same fraction of a bar the
+    /// song is on. Never as much as a whole bar, and never negative.
+    fn realign(&mut self, position: Option<f64>, frames: usize) -> u64 {
+        let quarters_per_bar = self.map.meter_at(self.captured).quarters_per_bar();
+        // A source with no position cannot say where the bar line is. The best available reading
+        // of "play was pressed" is that it was pressed on one — the same assumption the manual
+        // downbeat makes, and the only one MIDI clock's `Start` can support, since it resets the
+        // count wherever the playhead happened to be.
+        let phase = position.map_or(0.0, |q| (q / quarters_per_bar).rem_euclid(1.0));
+
+        if self.captured == 0 {
+            // Nothing captured yet, so no audio is holding the grid in place: move the grid
+            // instead of the audio. Exact, and it spends no ring.
+            self.map.set_bar_phase(-phase);
+            return 0;
+        }
+
+        let per_bar = self.map.frames_per_bar_at(self.captured);
+        let shift = (phase - self.map.bars_at(self.captured)).rem_euclid(1.0);
+        // Nothing finer than a block can be placed at all — this runs once per block, and capture
+        // begins on a block boundary — so a seam under one block is noise. A seam within a block
+        // of a *whole* bar is the same noise seen from the other side: the head is a hair late
+        // rather than most of a bar early, and chasing the next bar line would spend nearly a bar
+        // of ring to correct a rounding error. Both round to no seam at all.
+        let block = frames as f64;
+        if shift * per_bar <= block || (1.0 - shift) * per_bar <= block {
+            return 0;
+        }
+        (shift * per_bar).round() as u64
     }
 
     /// Bars elapsed at the write head.
@@ -517,7 +672,7 @@ mod tests {
         let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
         let stopped = Transport::stopped(120.0, Meter::FOUR_FOUR);
         for _ in 0..100 {
-            assert_eq!(clock.advance(&stopped, 128), 0);
+            assert_eq!(clock.advance(&stopped, 128).frames, 0);
         }
         assert_eq!(clock.captured(), 0);
     }
@@ -534,7 +689,7 @@ mod tests {
         // Now the host bounces: twenty minutes of song at 200x, transport reporting "playing".
         let bounce = Transport { offline: true, ..rolling };
         for _ in 0..100_000 {
-            assert_eq!(clock.advance(&bounce, 512), 0);
+            assert_eq!(clock.advance(&bounce, 512).frames, 0);
         }
         assert_eq!(
             clock.captured(),
@@ -544,7 +699,7 @@ mod tests {
         assert_eq!(clock.offline_blocks(), 100_000);
 
         // And it recovers afterwards.
-        assert_eq!(clock.advance(&rolling, 512), 512);
+        assert_eq!(clock.advance(&rolling, 512).frames, 512);
     }
 
     #[test]
@@ -576,6 +731,237 @@ mod tests {
         for _ in 0..100 { clock.advance(&rolling, 512); check(&clock, &mut previous_bars); }
 
         assert!(clock.head_bars() > 0.0);
+    }
+
+    // ---- splices ----
+
+    const BLOCK: usize = 512;
+    /// Frames in one 4/4 bar at 120 BPM.
+    const BAR: f64 = 96_000.0;
+
+    /// Rolls `blocks` blocks at 120 BPM, threading the song position along at the same rate.
+    /// Returns where the playhead ends up, in quarter notes.
+    fn roll(clock: &mut CaptureClock, from_quarters: f64, blocks: usize) -> f64 {
+        let mut quarters = from_quarters;
+        let per_block = BLOCK as f64 * 120.0 / (60.0 * SR as f64);
+        for _ in 0..blocks {
+            clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, quarters), BLOCK);
+            quarters += per_block;
+        }
+        quarters
+    }
+
+    fn stop(clock: &mut CaptureClock, blocks: usize) {
+        let stopped = Transport::stopped(120.0, Meter::FOUR_FOUR);
+        for _ in 0..blocks {
+            clock.advance(&stopped, BLOCK);
+        }
+    }
+
+    /// Where the *first frame of the block just captured* sits within its bar, 0 to 1.
+    fn head_phase(clock: &CaptureClock, frames: usize) -> f64 {
+        clock.map().bars_at(clock.captured() - frames as u64).rem_euclid(1.0)
+    }
+
+    /// Where a song position sits within its bar, in 4/4.
+    fn song_phase(quarters: f64) -> f64 {
+        (quarters / 4.0).rem_euclid(1.0)
+    }
+
+    /// Two phases agree to within a block. Comparing modulo one bar, so 0.999 and 0.001 are close.
+    fn in_phase(a: f64, b: f64) -> bool {
+        let d = (a - b).rem_euclid(1.0);
+        d.min(1.0 - d) * BAR <= BLOCK as f64
+    }
+
+    #[test]
+    fn a_restart_somewhere_else_puts_the_bar_lines_back_on_the_music() {
+        // The bug this exists for: stop in almost any DAW and the playhead returns to the top of
+        // the arrangement. Press play again and capture carries on from the frame it stopped at,
+        // so the grid rules the new take at whatever fraction of a bar the stop happened to leave.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        roll(&mut clock, 0.0, 400);
+        stop(&mut clock, 50);
+
+        // Play again from bar 10 and a third — nothing to do with where it stopped.
+        let restart = 37.3;
+        let advance = clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, restart), BLOCK);
+
+        assert!(advance.seam > 0, "the restart moved and nothing was inserted");
+        assert!((advance.seam as f64) < BAR, "a splice may never cost a whole bar");
+        assert!(
+            in_phase(head_phase(&clock, BLOCK), song_phase(restart)),
+            "the take resumes at {} of a bar, but the song is at {}",
+            head_phase(&clock, BLOCK),
+            song_phase(restart)
+        );
+    }
+
+    #[test]
+    fn a_pause_that_resumes_where_it_stopped_costs_nothing() {
+        // The other half of the same rule, and the reason the correction is measured rather than
+        // applied blindly: a host that really does pause is already in phase, and spending a
+        // half bar of ring to "fix" that would be the same bug wearing a different hat.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let at = roll(&mut clock, 0.0, 400);
+        let before = clock.captured();
+        stop(&mut clock, 50);
+
+        let advance = clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, at), BLOCK);
+        assert_eq!(advance.seam, 0, "resuming in place inserted {} frames", advance.seam);
+        assert_eq!(clock.captured(), before + BLOCK as u64);
+    }
+
+    #[test]
+    fn a_loop_that_wraps_on_a_bar_line_inserts_nothing() {
+        // A DAW looping four bars sends the playhead backwards every pass. That is a locate, and
+        // it is detected as one — but four bars is a whole number of them, so the phase already
+        // agrees and the right correction is none at all.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let mut at = 16.0;
+        for _ in 0..4 {
+            at = roll(&mut clock, at, 375); // four bars, near enough
+            at -= 16.0; // back to the top of the loop
+        }
+        assert_eq!(clock.seam_frames(), 0, "a bar-aligned loop spent {} frames", clock.seam_frames());
+    }
+
+    #[test]
+    fn a_loop_that_is_not_a_whole_number_of_bars_is_re_phased() {
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let at = roll(&mut clock, 0.0, 300);
+        // Back three and a half bars: every pass lands the take half a bar out from the last.
+        let wrapped = at - 14.0;
+        let advance = clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, wrapped), BLOCK);
+        assert!(advance.seam > 0, "the half-bar wrap was not corrected");
+        assert!(
+            in_phase(head_phase(&clock, BLOCK), song_phase(wrapped)),
+            "after the wrap the take is at {} of a bar and the song is at {}",
+            head_phase(&clock, BLOCK),
+            song_phase(wrapped)
+        );
+    }
+
+    #[test]
+    fn the_first_press_moves_the_grid_rather_than_the_audio() {
+        // Nothing is captured yet, so nothing is holding the graticule in place. Shifting it is
+        // exact and costs no ring; inserting silence in front of an empty buffer would be neither.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let start = 5.5; // a bar and three eighths in
+        let advance = clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, start), BLOCK);
+
+        assert_eq!(advance.seam, 0, "the first press must not spend any ring");
+        assert_eq!(clock.captured(), BLOCK as u64);
+        assert!(
+            in_phase(head_phase(&clock, BLOCK), song_phase(start)),
+            "the take begins at {} of a bar and the song is at {}",
+            head_phase(&clock, BLOCK),
+            song_phase(start)
+        );
+    }
+
+    #[test]
+    fn a_source_with_no_position_lands_the_restart_on_a_bar_line() {
+        // MIDI clock from Live, or the page's own run button: nothing says where the playhead is.
+        // The only reading available is that play was pressed on a downbeat, and taking it at
+        // least keeps every restart on the same grid as every other.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let rolling = Transport::rolling(120.0, Meter::FOUR_FOUR);
+        for _ in 0..137 {
+            clock.advance(&rolling, BLOCK);
+        }
+        assert!(head_phase(&clock, BLOCK) > 0.05, "the head should be mid-bar to make this a test");
+        stop(&mut clock, 10);
+        clock.advance(&rolling, BLOCK);
+        assert!(
+            in_phase(head_phase(&clock, BLOCK), 0.0),
+            "the restart landed at {} of a bar rather than on the line",
+            head_phase(&clock, BLOCK)
+        );
+    }
+
+    #[test]
+    fn coming_back_from_an_export_is_a_splice_too() {
+        // An offline render reports rolling the whole way and captures nothing, so the passage
+        // after it is somewhere else entirely — the same discontinuity as a stop, and it has to
+        // re-phase for the same reason.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let rolling = Transport::rolling(120.0, Meter::FOUR_FOUR);
+        for _ in 0..137 {
+            clock.advance(&rolling, BLOCK);
+        }
+        let bounce = Transport { offline: true, ..rolling };
+        for _ in 0..5000 {
+            clock.advance(&bounce, BLOCK);
+        }
+        clock.advance(&rolling, BLOCK);
+        assert!(
+            in_phase(head_phase(&clock, BLOCK), 0.0),
+            "the take resumed at {} of a bar after the export",
+            head_phase(&clock, BLOCK)
+        );
+    }
+
+    #[test]
+    fn a_jittery_position_report_does_not_spend_the_ring() {
+        // A host whose reported position wanders by a few milliseconds either side of the truth
+        // must not be read as locating every block. Nothing here is a real jump, so nothing may
+        // be inserted after the first press.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let wobble = [0.0, 0.02, -0.03, 0.05, -0.01, 0.04, -0.05, 0.01];
+        let per_block = BLOCK as f64 * 120.0 / (60.0 * SR as f64);
+        let mut quarters = 0.25; // and not on a bar line, so a spurious splice would show
+        for i in 0..2000 {
+            let reported = quarters + wobble[i % wobble.len()];
+            clock.advance(&Transport::at(120.0, Meter::FOUR_FOUR, reported), BLOCK);
+            quarters += per_block;
+        }
+        assert_eq!(clock.seam_frames(), 0, "jitter cost {} frames", clock.seam_frames());
+    }
+
+    #[test]
+    fn an_empty_block_is_not_a_splice() {
+        // A host handing over a zero-length block — a bypass, a suspended graph — has not said
+        // anything about its transport. Reading it as a stop would cost a position-less source
+        // most of a bar of ring for nothing.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let rolling = Transport::rolling(120.0, Meter::FOUR_FOUR);
+        for i in 0..400 {
+            clock.advance(&rolling, if i % 7 == 0 { 0 } else { BLOCK });
+        }
+        assert_eq!(clock.seam_frames(), 0, "empty blocks cost {} frames", clock.seam_frames());
+    }
+
+    #[test]
+    fn splices_never_run_the_bars_backwards() {
+        // The correction is always forwards, to the *next* aligned position rather than the
+        // nearest one, because everything downstream — erosion, the lap, the wrap — rests on the
+        // bar axis never decreasing.
+        let mut clock = CaptureClock::new(SR, 120.0, Meter::FOUR_FOUR);
+        let mut previous = f64::NEG_INFINITY;
+        let mut check = |clock: &CaptureClock| {
+            let bars = clock.head_bars();
+            assert!(bars >= previous, "bars went backwards: {bars} after {previous}");
+            previous = bars;
+        };
+        // Twenty restarts at arbitrary, deliberately awkward positions, with meter and tempo
+        // moving underneath them.
+        let mut at = 0.0;
+        for i in 0..20 {
+            let meter = if i % 3 == 0 { Meter::new(7, 8) } else { Meter::FOUR_FOUR };
+            let bpm = 90.0 + (i as f64) * 3.7;
+            at = 13.37 * (i as f64) + 0.618;
+            let per_block = BLOCK as f64 * bpm / (60.0 * SR as f64);
+            for _ in 0..(20 + i * 3) {
+                clock.advance(&Transport { position: Some(at), ..Transport::rolling(bpm, meter) }, BLOCK);
+                at += per_block;
+                check(&clock);
+            }
+            stop(&mut clock, 3);
+            check(&clock);
+        }
+        assert!(at > 0.0);
+        assert!(clock.seam_frames() > 0, "twenty locates should have inserted something");
     }
 
     #[test]

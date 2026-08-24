@@ -209,12 +209,26 @@ impl Waveroll {
     }
 
     /// Sets the transport the next captured blocks will be attributed to.
-    pub fn transport(&mut self, playing: bool, bpm: f64, num: u32, den: u32, offline: bool) {
+    ///
+    /// `position` is quarter notes from the top of the song, and may be left out by a page that
+    /// has no such notion — a plain input capture has none. Without it a stop and a restart is
+    /// taken to have happened on a downbeat, which is the only reading available and the same one
+    /// the manual downbeat key makes.
+    pub fn transport(
+        &mut self,
+        playing: bool,
+        bpm: f64,
+        num: u32,
+        den: u32,
+        offline: bool,
+        position: Option<f64>,
+    ) {
         self.transport = Transport {
             playing,
             bpm: if bpm.is_finite() && bpm > 0.0 { bpm } else { self.transport.bpm },
             meter: Meter::new(num.max(1), den.max(1)),
             offline,
+            position: position.filter(|p| p.is_finite()),
         };
     }
 
@@ -234,6 +248,11 @@ impl Waveroll {
             if self.pll.settled() {
                 self.transport.bpm = self.pll.bpm();
             }
+            // Quarter notes since the last Start or Continue, which is all MIDI clock has. It does
+            // not agree with the host's own bar numbers and is not asked to: only the fraction of
+            // a bar is used, and a `Start` putting that at zero is exactly right — the stream
+            // begins counting at the moment playback did.
+            self.transport.position = Some(self.pll.quarters());
         }
     }
 
@@ -244,7 +263,11 @@ impl Waveroll {
         if frames == 0 {
             return 0;
         }
-        let taken = self.clock.advance(&self.transport, frames);
+        let advance = self.clock.advance(&self.transport, frames);
+        // The splice first, and as real frames: the clock has already counted them, and a reader
+        // that found last lap's audio in the gap would have no way to tell it from a take.
+        self.producer.silence(advance.seam);
+        let taken = advance.frames;
         if taken == 0 {
             return 0;
         }

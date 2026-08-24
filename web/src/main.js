@@ -269,7 +269,9 @@ function paint() {
     state.clockSource = 'internal';
   }
   if (state.clockSource === 'internal') {
-    wr.transport(state.running, Number($('bpmIn')?.value) || 120, 4, 4, false);
+    // No song position: the page's own transport is a run/stop button, not a playhead, so a
+    // restart is taken to have happened on a downbeat.
+    wr.transport(state.running, Number($('bpmIn')?.value) || 120, 4, 4, false, undefined);
   }
 
   if (state.demo) {

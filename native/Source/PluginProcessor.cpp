@@ -61,6 +61,14 @@ void WaverollProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Mi
                 transport.numerator = (uint32_t) signature->numerator;
                 transport.denominator = (uint32_t) signature->denominator;
             }
+            // Where the playhead is, so the core can tell a stop-and-restart from a pause and put
+            // the bar lines back where the music is. Every host that reports anything reports
+            // this; the core copes with the ones that do not.
+            if (auto ppq = position->getPpqPosition())
+            {
+                transport.has_position = true;
+                transport.position = *ppq;
+            }
         }
     }
 

@@ -141,6 +141,41 @@ impl Producer {
         // with Acquire. This is the single line that publishes the block.
         inner.write.store(start + frames as u64, Ordering::Release);
     }
+
+    /// Advances the write head over `frames` of silence.
+    ///
+    /// This is how a splice is laid down: the clock inserts dead frames to bring the grid back
+    /// into phase with the song after a locate, and they have to *be* in the ring, not merely be
+    /// counted. Anything else and a reader would find last lap's audio in the gap — plausible,
+    /// wrong, and indistinguishable from a real take.
+    ///
+    /// Real-time safe on the same terms as [`write`](Self::write): no allocation, no locking, and
+    /// bounded work however long the gap is. A gap longer than the ring only ever needs its last
+    /// `capacity` frames cleared, since nothing before that is reachable any more — which is also
+    /// what keeps this from tripping `write`'s block-size assertion at a very slow tempo.
+    pub fn silence(&mut self, frames: u64) {
+        if frames == 0 {
+            return;
+        }
+        let inner = &*self.inner;
+        let start = inner.write.load(Ordering::Relaxed);
+        let fill = frames.min(inner.capacity as u64) as usize;
+        // Where the cleared region begins: the end of the gap, `fill` frames back.
+        let begin = (start + frames - fill as u64) as usize & inner.mask;
+        let contiguous = fill.min(inner.capacity - begin);
+
+        for c in 0..inner.channels {
+            let plane = c * inner.capacity;
+            for slot in &inner.data[plane + begin..plane + begin + contiguous] {
+                slot.store(0, Ordering::Relaxed);
+            }
+            for slot in &inner.data[plane..plane + (fill - contiguous)] {
+                slot.store(0, Ordering::Relaxed);
+            }
+        }
+
+        inner.write.store(start + frames, Ordering::Release);
+    }
 }
 
 impl Reader {
@@ -286,6 +321,51 @@ mod tests {
         assert_eq!(out, a);
         assert!(r.read_into(1, 0, &mut out));
         assert_eq!(out, b);
+    }
+
+    #[test]
+    fn a_splice_reads_back_as_silence_on_every_channel() {
+        let (mut p, r) = ring(1024, 2, 48_000);
+        let a = ramp(1, 128);
+        p.write(&[&a, &a], 128);
+        p.silence(64);
+        p.write(&[&a, &a], 128);
+
+        assert_eq!(p.written(), 320, "the gap counts as frames, or the grid drifts off the ring");
+        for channel in 0..2 {
+            let mut out = vec![0.0; 64];
+            assert!(r.read_into(channel, 128, &mut out));
+            assert!(out.iter().all(|s| *s == 0.0), "channel {channel} held {out:?}");
+            let mut after = vec![0.0; 128];
+            assert!(r.read_into(channel, 192, &mut after));
+            assert_eq!(after, a, "the block after the gap moved");
+        }
+    }
+
+    #[test]
+    fn a_splice_that_straddles_the_wrap_is_still_silent() {
+        let (mut p, r) = ring(64, 1, 48_000);
+        let filler = ramp(1, 56);
+        p.write(&[&filler], 56);
+        p.silence(32);
+        let mut out = vec![0.0; 32];
+        assert!(r.read_into(0, 56, &mut out));
+        assert!(out.iter().all(|s| *s == 0.0), "the wrapped half kept its old audio: {out:?}");
+    }
+
+    #[test]
+    fn a_splice_longer_than_the_ring_leaves_nothing_behind() {
+        // At a very slow tempo a bar can outrun the buffer. Only the last `capacity` frames of the
+        // gap are reachable, so only those need clearing — but every one of them must be clear,
+        // and the head must still have moved the whole way.
+        let (mut p, r) = ring(64, 1, 48_000);
+        let filler = ramp(1, 64);
+        p.write(&[&filler], 64);
+        p.silence(500);
+        assert_eq!(p.written(), 564);
+        let mut out = vec![0.0; 64];
+        assert!(r.read_into(0, 500, &mut out));
+        assert!(out.iter().all(|s| *s == 0.0), "old audio survived the gap: {out:?}");
     }
 
     #[test]

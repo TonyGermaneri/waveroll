@@ -31,12 +31,36 @@ impl Core {
     /// Captures `blocks` blocks of a constant value, rolling at 120 BPM.
     fn capture(&self, blocks: usize, value: f32, playing: bool, offline: bool) {
         let transport =
-            WrTransport { playing, offline, bpm: 120.0, numerator: 4, denominator: 4 };
+            WrTransport { playing, offline, bpm: 120.0, numerator: 4, denominator: 4,
+                          has_position: false, position: 0.0 };
         let samples = vec![value; BLOCK as usize];
         let pointers = [samples.as_ptr(), samples.as_ptr()];
         for _ in 0..blocks {
             wr_capture(self.0, pointers.as_ptr(), 2, BLOCK, &transport);
         }
+    }
+
+    /// Captures `blocks` blocks rolling at 120 BPM, threading the song position along with them.
+    /// Returns where the playhead ends up, in quarter notes.
+    fn capture_from(&self, blocks: usize, value: f32, quarters: f64) -> f64 {
+        let samples = vec![value; BLOCK as usize];
+        let pointers = [samples.as_ptr(), samples.as_ptr()];
+        let mut at = quarters;
+        let per_block = f64::from(BLOCK) * 120.0 / (60.0 * f64::from(SR));
+        for _ in 0..blocks {
+            let transport = WrTransport {
+                playing: true,
+                offline: false,
+                bpm: 120.0,
+                numerator: 4,
+                denominator: 4,
+                has_position: true,
+                position: at,
+            };
+            wr_capture(self.0, pointers.as_ptr(), 2, BLOCK, &transport);
+            at += per_block;
+        }
+        at
     }
 
     /// Blocks for one bar at 120 BPM: two seconds.
@@ -69,6 +93,8 @@ fn every_entry_point_tolerates_a_null_core() {
         bpm: 120.0,
         numerator: 4,
         denominator: 4,
+        has_position: false,
+        position: 0.0,
     };
     let samples = [0.0f32; 64];
     let pointers = [samples.as_ptr(), samples.as_ptr()];
@@ -164,6 +190,58 @@ fn capture_follows_the_transport() {
 }
 
 #[test]
+fn a_restart_elsewhere_in_the_song_puts_the_grid_back_on_the_music() {
+    // The whole path, as the plugin drives it. Roll for a while, stop — which in almost every DAW
+    // sends the playhead back to the top — and play again from somewhere else entirely. What the
+    // editor draws has to go on landing where the music is.
+    let core = Core::new(2);
+    core.capture_from(Core::blocks_per_bar() * 5 + 7, 0.5, 0.0);
+    core.capture(20, 0.0, false, false); // stopped
+
+    let restart = 37.3; // bar ten and a third, nothing to do with where it stopped
+    let blocks = Core::blocks_per_bar() * 4;
+    let ended = core.capture_from(blocks, 0.5, restart);
+
+    let status = core.status();
+    // `head` is a fraction of a 16-bar window, so this is the head in absolute bars within the lap.
+    let phase = (status.head * status.window_bars).rem_euclid(1.0);
+    // The head is one block behind where the song got to: the last block's position is reported
+    // at its start, and it has been captured since.
+    let expected = (ended / 4.0).rem_euclid(1.0);
+    let off = (phase - expected).rem_euclid(1.0);
+    assert!(
+        off.min(1.0 - off) < 0.005,
+        "the take sits at {phase} of a bar and the song is at {expected}"
+    );
+}
+
+#[test]
+fn a_selection_across_a_restart_is_still_the_length_it_says() {
+    // The reason the splice is frames rather than a hole in bar space: a four-bar selection has to
+    // hold four bars of audio whatever happened in the middle of it, or the loop does not loop.
+    let core = Core::new(2);
+    core.capture_from(Core::blocks_per_bar() * 3 + 11, 0.5, 0.0);
+    core.capture(20, 0.0, false, false);
+    core.capture_from(Core::blocks_per_bar() * 8, 0.5, 37.3);
+
+    wr_set_unit(core.0, 1.0);
+    wr_select_percent(core.0, 5); // half of sixteen bars
+    let status = core.status();
+    assert_eq!(status.selection_state, 3, "it should be ready to stage");
+    assert!((status.selection_bars - 8.0).abs() < 1e-6, "got {}", status.selection_bars);
+
+    let length = wr_stage(core.0, 0);
+    let bytes = unsafe { std::slice::from_raw_parts(wr_staged_bytes(core.0), length) };
+    let data = find_chunk(bytes, b"data").expect("a data chunk");
+    // Eight bars of 4/4 at 120 BPM is sixteen seconds; stereo f32 is eight bytes a frame.
+    assert_eq!(
+        data.len(),
+        16 * SR as usize * 8,
+        "a splice inside the selection changed how long it is"
+    );
+}
+
+#[test]
 fn a_mono_host_buffer_still_fills_a_stereo_core() {
     // A host may hand over fewer channels than the core was configured for. The ring already
     // duplicates its last plane for exactly this case; the boundary has to let it.
@@ -171,7 +249,8 @@ fn a_mono_host_buffer_still_fills_a_stereo_core() {
     let samples = vec![0.25f32; BLOCK as usize];
     let pointers = [samples.as_ptr(), std::ptr::null()];
     let transport =
-        WrTransport { playing: true, offline: false, bpm: 120.0, numerator: 4, denominator: 4 };
+        WrTransport { playing: true, offline: false, bpm: 120.0, numerator: 4, denominator: 4,
+                      has_position: false, position: 0.0 };
     let taken = wr_capture(core.0, pointers.as_ptr(), 2, BLOCK, &transport);
     assert_eq!(taken, BLOCK, "a mono buffer must not silently capture nothing");
     assert_eq!(core.status().captured, u64::from(BLOCK));
@@ -269,7 +348,8 @@ fn the_grid_ladder_walks_and_stops_at_both_ends() {
 fn midi_is_captured_on_the_same_axis_as_the_audio_and_exports() {
     let core = Core::new(1);
     let transport =
-        WrTransport { playing: true, offline: false, bpm: 120.0, numerator: 4, denominator: 4 };
+        WrTransport { playing: true, offline: false, bpm: 120.0, numerator: 4, denominator: 4,
+                      has_position: false, position: 0.0 };
     let samples = vec![0.1f32; BLOCK as usize];
     let pointers = [samples.as_ptr(), samples.as_ptr()];
 
@@ -303,7 +383,8 @@ fn midi_arriving_for_a_refused_block_is_refused_too() {
     // Otherwise a clip contains notes from a passage whose audio was never recorded.
     let core = Core::new(1);
     let stopped =
-        WrTransport { playing: false, offline: false, bpm: 120.0, numerator: 4, denominator: 4 };
+        WrTransport { playing: false, offline: false, bpm: 120.0, numerator: 4, denominator: 4,
+                      has_position: false, position: 0.0 };
     let samples = vec![0.0f32; BLOCK as usize];
     let pointers = [samples.as_ptr(), samples.as_ptr()];
     wr_capture(core.0, pointers.as_ptr(), 1, BLOCK, &stopped);

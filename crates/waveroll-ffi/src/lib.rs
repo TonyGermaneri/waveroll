@@ -55,6 +55,12 @@ pub struct WrTransport {
     pub bpm: f64,
     pub numerator: u32,
     pub denominator: u32,
+    /// Whether `position` means anything. A host that cannot say where the playhead is leaves this
+    /// false, and the grid falls back to assuming play was pressed on a downbeat.
+    pub has_position: bool,
+    /// Quarter notes from the top of the song. Only its fraction of a bar is ever used, and only
+    /// when the transport splices.
+    pub position: f64,
 }
 
 /// What the editor needs to draw its chrome.
@@ -215,9 +221,19 @@ pub extern "C" fn wr_capture(
             bpm: if transport.bpm.is_finite() && transport.bpm > 0.0 { transport.bpm } else { 120.0 },
             meter: Meter::new(transport.numerator.max(1), transport.denominator.max(1)),
             offline: transport.offline,
+            position: (transport.has_position && transport.position.is_finite())
+                .then_some(transport.position),
         };
-        core.block_start = core.clock.captured();
-        let taken = core.clock.advance(&transport, frames as usize);
+        let advance = core.clock.advance(&transport, frames as usize);
+        // The splice first, and as real frames: the clock has already counted them, and a reader
+        // that found last lap's audio in the gap would have no way to tell it from a take.
+        core.producer.silence(advance.seam);
+        let taken = advance.frames;
+        // Where this block starts on the capture axis, measured after the seam so a MIDI event's
+        // offset within it lands on the frame its audio does rather than a bar earlier. On a
+        // refused block this is the head itself, which is what makes an event arriving during a
+        // stop land nowhere at all.
+        core.block_start = core.clock.captured() - taken as u64;
         if taken == 0 {
             return 0;
         }

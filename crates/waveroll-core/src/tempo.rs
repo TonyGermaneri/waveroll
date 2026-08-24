@@ -5,8 +5,12 @@
 //! **It is keyed on capture frames, not on song position.** Capture follows the host transport, so
 //! a four-bar loop in the DAW fills the window with four passes of the same bars. If the grid were
 //! ruled in song position the bar numbers would run backwards in the middle of the screen. What is
-//! accumulated here is *elapsed transport time* — monotonic, gapless, and unaware that a locate
-//! ever happened. Song position, if it is wanted at all, is display metadata hung off the side.
+//! accumulated here is *elapsed transport time* — monotonic, and unaware of where a locate went.
+//! Song position, if it is wanted at all, is display metadata hung off the side.
+//!
+//! It is not quite *gapless*: `CaptureClock` lays dead frames at a splice so the bar lines carry on
+//! landing where the music does across a stop. The map does not know or care — a seam is frames
+//! like any others, which is the whole reason it is done that way rather than as a hole in here.
 //!
 //! **A tempo change does not rewrite history.** Store one BPM and every bar line drawn over audio
 //! captured at a different tempo is wrong. So each observed change appends an entry and the older
@@ -95,6 +99,16 @@ impl TempoMap {
     /// Clears any bar-phase correction. What a host that reports true position gives us for free.
     pub fn clear_downbeat(&mut self) {
         self.bar_phase = 0.0;
+    }
+
+    /// Sets the phase directly, as a fraction of a bar.
+    ///
+    /// [`set_downbeat`](Self::set_downbeat) is the same idea expressed as "this frame is a
+    /// downbeat", which is what a tapping user means. This is for the case that cannot be written
+    /// that way: nothing has been captured yet and the downbeat is a fraction of a bar *before*
+    /// frame zero, which is not a frame at all.
+    pub fn set_bar_phase(&mut self, phase: f64) {
+        self.bar_phase = if phase.is_finite() { phase.rem_euclid(1.0) } else { 0.0 };
     }
 
     pub fn sample_rate(&self) -> f64 { self.sample_rate }

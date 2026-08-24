@@ -15,7 +15,7 @@ pub mod tempo;
 pub mod view;
 pub mod wav;
 
-pub use clock::{CaptureClock, ClockPll, ClockSource, Transport};
+pub use clock::{Advance, CaptureClock, ClockPll, ClockSource, Transport};
 pub use grid::{Selection, Unit};
 pub use ring::{Producer, Reader, ring};
 pub use tempo::{Meter, TempoMap};

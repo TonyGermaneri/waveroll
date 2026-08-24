@@ -27,6 +27,13 @@ typedef struct
     double   bpm;
     uint32_t numerator;
     uint32_t denominator;
+    /** Whether `position` means anything. A host that cannot say where the playhead is leaves this
+        false, and the grid falls back to assuming play was pressed on a downbeat. */
+    bool     has_position;
+    /** Quarter notes from the top of the song. Only its fraction of a bar is ever used, and only
+        when the transport splices -- a stop and a restart, or a locate while rolling. Without it
+        the bar lines drawn over the resumed take sit wherever the stop left them. */
+    double   position;
 } WrTransport;
 
 /** What the editor needs to draw its chrome. */
